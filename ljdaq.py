@@ -56,6 +56,10 @@ last_mc = 0
 # EXCEPTIONS
 # ================================
 
+# --------------------------------------------------------
+# Abort sequence error to crash the program and force a 
+# manual restart.
+# --------------------------------------------------------
 class SystemFault(Exception):
     pass
 
@@ -104,7 +108,9 @@ def configure_digital_io(diopin_num, func):
         ljm.eWriteName(mb, f"DIO{diopin_num}_DIRECTION", 1)
         ljm.eWriteName(mb, f"DIO{diopin_num}_STATE", 0)
 
-
+# --------------------------------------------------------
+# Configures the board clock at frequency freq.
+# --------------------------------------------------------
 def configure_clock(freq):
     ljm.eWriteName(mb, "DIO_EF_CLOCK0_ENABLE", 0)
     ljm.eWriteName(mb, "DIO_EF_CLOCK0_DIVISOR", 1)
@@ -190,16 +196,26 @@ def move(diopin_num, nextpos):
     else:
         print(Fore.RED + "MOVE COMMAND FAILED: " + str(nextpos.upper()) + " INVALID MOVEMENT COMMAND")
         return False
-    
+
+# --------------------------------------------------------
+# Detects whether a valid move command has come in. 
+# move commands must be on a rising edge.
+# --------------------------------------------------------    
 def detect_move(pin):
     if dread(pin) == 1 and last_mc == 0:
         return True
     return False
 
+# --------------------------------------------------------
+# Controlled movement of servo 1.
+# --------------------------------------------------------
 def moveseq1(pin1):
     # TBD
     pass
 
+# --------------------------------------------------------
+# Controlled movement of servo 2.
+# --------------------------------------------------------
 def moveseq2(pin2):
     # TBD
     pass
@@ -268,6 +284,10 @@ def fire(ipin, ftime):
 # SAFETY FUNCTIONS
 # ================================
 
+# --------------------------------------------------------
+# Averages current temperature with past 10 temps and 
+# checks to see if it is within bounds.
+# --------------------------------------------------------
 def check_temperature(history, temperature):
     sum = 0
     for i in history:
@@ -277,6 +297,10 @@ def check_temperature(history, temperature):
         return False
     return True
 
+# --------------------------------------------------------
+# Averages current pressure with past 10 pressures and 
+# checks to see if it is within bounds.
+# --------------------------------------------------------
 def check_pressure(history, pressure):
     sum = 0
     for i in history:
@@ -286,6 +310,10 @@ def check_pressure(history, pressure):
         return False
     return True
 
+# --------------------------------------------------------
+# Averages current load with past 10 loads and 
+# checks to see if it is within bounds.
+# --------------------------------------------------------
 def check_load(history, load):
     sum = 0
     for i in history:
@@ -295,6 +323,10 @@ def check_load(history, load):
         return False
     return True
 
+# --------------------------------------------------------
+# IKills the current running sequence by shutting off
+# a power pin, sending an abort message.
+# --------------------------------------------------------
 def kill(safet, safep, safel, kill_pin):
     dwrite(kill_pin, 0)
     if not safet:
@@ -376,6 +408,9 @@ while not killed:
         if movcom:
             movseq1(servo1_pwm_pin)
             movseq2(servo2_pwm_pin)
+            last_mc = 1
+        else:
+            last_mc = 0
 
         print(Fore.GREEN + "Temperature (C):", temp)
         print(Fore.GREEN + "Pressure (psi):", pres)
