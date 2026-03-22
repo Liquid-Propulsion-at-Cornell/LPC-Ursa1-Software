@@ -274,10 +274,7 @@ def kill(safet, safep, safel, kill_pin):
         print(Fore.RED + "ABORTING: PRESSURE UNSAFE")
     if not safel:
         print(Fore.RED + "ABORTING: LOAD UNSAFE")
-
-def resume(kill_pin):
-    dwrite(kill_pin, 1)
-    killed = False
+    print(Fore.RED + "PLEASE RESET SYSTEM ONCE MANUALLY CONFIRMED SAFE")
 
 # ================================
 # CONFIGURATION
@@ -303,7 +300,7 @@ configure_digital_io(fire_pin, "input")
 # MAIN LOOP 
 # ================================
 
-while True:
+while not killed:
     temp = read_temperature(tpin_pos_num)
     pres = read_pressure(ppin_num, res_val, pmin, pmax)
     load = read_load(lpin_num, v_off, kload, v_kload)
@@ -324,8 +321,6 @@ while True:
             killed = True
         else:
             print(Fore.ORANGE + "WARNING: POTENTIALLY UNSAFE CONDITIONS")
-    elif not warn and killed:
-        resume(kill_pin_num)
 
     # ================================
     # MOVEMENT HANDLING HERE
