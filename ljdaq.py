@@ -1,23 +1,26 @@
 # LPC LABJACK T7 PYTHON CONFIG SCRIPT
 # Author: Thomas Tedeschi
-# Last Update Date: 3/21/2026
+# Last Update Date: 3/22/2026
 
 from labjack import ljm
 from colorama import Fore, Style, init
 import time
+import numpy as np
 
 # Open LabJack
-handle = ljm.openS("T7", "ANY", "ANY")
+mb = ljm.openS("T7", "ANY", "ANY")
 
 # GLOBAL CONSTANTS
 killed = False
 timestamp = 0
 celsius = 1
 farenheit = 2
-pastt = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-pastp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-pastl = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+pastt = np.zeros(hist)
+pastp = np.zeros(hist)
+pastl = np.zeros(hist)
 hist = 10
+last_mc = 0
+# pwm_freq = 
 # kill_pin_num = 
 # tpin_pos_num =
 # tpin_neg_num =
@@ -43,8 +46,18 @@ hist = 10
 # curpos =
 # startval =
 # openval =
+# movact_pin_num
 # closedval =
 # lastfire =
+# v_off
+# fire_time
+
+# ================================
+# EXCEPTIONS
+# ================================
+
+class SystemFault(Exception):
+    pass
 
 # ================================
 # CONFIG FUNCTIONS
@@ -61,12 +74,12 @@ def configure_thermocouple(ppin, npin, rng, rind, sett, temp):
     pos_name = f"AIN{ppin}"
     neg_name = f"AIN{ppin}_NEGATIVE_CH"
 
-    ljm.eWriteName(handle, neg_name, npin)
-    ljm.eWriteName(handle, f"{pos_name}_RANGE", rng)
-    ljm.eWriteName(handle, f"{pos_name}_RESOLUTION_INDEX", rind)
-    ljm.eWriteName(handle, f"{pos_name}_SETTLING_US", sett)
-    ljm.eWriteName(handle, f"{pos_name}_EF_INDEX", 22)
-    ljm.eWriteName(handle, f"{pos_name}_EF_CONFIG_A", temp)
+    ljm.eWriteName(mb, neg_name, npin)
+    ljm.eWriteName(mb, f"{pos_name}_RANGE", rng)
+    ljm.eWriteName(mb, f"{pos_name}_RESOLUTION_INDEX", rind)
+    ljm.eWriteName(mb, f"{pos_name}_SETTLING_US", sett)
+    ljm.eWriteName(mb, f"{pos_name}_EF_INDEX", 22)
+    ljm.eWriteName(mb, f"{pos_name}_EF_CONFIG_A", temp)
 
 # --------------------------------------------------------
 # Configures either a transducer or a loadcell since they
@@ -75,10 +88,10 @@ def configure_thermocouple(ppin, npin, rng, rind, sett, temp):
 #---------------------------------------------------------
 def configure_transducer_loadcell(apin, rng, rind):
     ain_name = f"AIN{apin}"
-    ljm.eWriteName(handle, f"{ain_name}_NEGATIVE_CH", 199)
-    ljm.eWriteName(handle, f"{ain_name}_RANGE", rng)
-    ljm.eWriteName(handle, f"{ain_name}_RESOLUTION_INDEX", rind)
-    ljm.eWriteName(handle, f"{ain_name}_SETTLING_US", 0)
+    ljm.eWriteName(mb, f"{ain_name}_NEGATIVE_CH", 199)
+    ljm.eWriteName(mb, f"{ain_name}_RANGE", rng)
+    ljm.eWriteName(mb, f"{ain_name}_RESOLUTION_INDEX", rind)
+    ljm.eWriteName(mb, f"{ain_name}_SETTLING_US", 0)
 
 # --------------------------------------------------------
 # Configures a pin as digital I/O, with the function func.
@@ -86,26 +99,28 @@ def configure_transducer_loadcell(apin, rng, rind):
 # --------------------------------------------------------
 def configure_digital_io(diopin_num, func):
     if func == "input":
-        ljm.eWriteName(handle, f"DIO{diopin_num}_DIRECTION", 0)
+        ljm.eWriteName(mb, f"DIO{diopin_num}_DIRECTION", 0)
     else:
-        ljm.eWriteName(handle, f"DIO{diopin_num}_DIRECTION", 1)
-        ljm.eWriteName(handle, f"DIO{diopin_num}_STATE", 0)
+        ljm.eWriteName(mb, f"DIO{diopin_num}_DIRECTION", 1)
+        ljm.eWriteName(mb, f"DIO{diopin_num}_STATE", 0)
+
+
+def configure_clock(freq):
+    ljm.eWriteName(mb, "DIO_EF_CLOCK0_ENABLE", 0)
+    ljm.eWriteName(mb, "DIO_EF_CLOCK0_DIVISOR", 1)
+    ljm.eWriteName(mb, "DIO_EF_CLOCK0_ROLL_VALUE", 80000000/freq)
+    ljm.eWriteName(mb, "DIO_EF_CLOCK0_ENABLE", 1)
 
 # --------------------------------------------------------
 # Configures a DIO pin to output pwm at 50 HZ and start
 # value startval
 # --------------------------------------------------------
 def configure_pwm(diopin_num, startval):
-    ljm.eWriteName(handle, "DIO_EF_CLOCK0_ENABLE", 0)
-    ljm.eWriteName(handle, "DIO_EF_CLOCK0_DIVISOR", 1)
-    ljm.eWriteName(handle, "DIO_EF_CLOCK0_ROLL_VALUE", 1600000)
-    ljm.eWriteName(handle, "DIO_EF_CLOCK0_ENABLE", 1)
-
-    ljm.eWriteName(handle, f"DIO{diopin_num}_EF_ENABLE", 0)
-    ljm.eWriteName(handle, f"DIO{diopin_num}_EF_INDEX", 0)
-    ljm.eWriteName(handle, f"DIO{diopin_num}_EF_OPTIONS", 0)
-    ljm.eWriteName(handle, f"DIO{diopin_num}_EF_CONFIG_A", startval)
-    ljm.eWriteName(handle, f"DIO{diopin_num}_EF_ENABLE", 1)
+    ljm.eWriteName(mb, f"DIO{diopin_num}_EF_ENABLE", 0)
+    ljm.eWriteName(mb, f"DIO{diopin_num}_EF_INDEX", 0)
+    ljm.eWriteName(mb, f"DIO{diopin_num}_EF_OPTIONS", 0)
+    ljm.eWriteName(mb, f"DIO{diopin_num}_EF_CONFIG_A", startval)
+    ljm.eWriteName(mb, f"DIO{diopin_num}_EF_ENABLE", 1)
 
 # ================================
 # MEASUREMENT FUNCTIONS
@@ -116,7 +131,7 @@ def configure_pwm(diopin_num, startval):
 # voltage by known resistance (Ohm's Law).
 # --------------------------------------------------------
 def measure_transducer_current(apin, resistance):
-    voltage = ljm.eReadName(handle, f"AIN{apin}")
+    voltage = ljm.eReadName(mb, f"AIN{apin}")
     return voltage / resistance
 
 # --------------------------------------------------------
@@ -129,7 +144,7 @@ def current_to_pressure(current, pmin, pmax):
 # Measures the temperature by reading TC pin. Returns temp.
 # --------------------------------------------------------
 def read_temperature(tpin):
-    return ljm.eReadName(handle, f"AIN{tpin}_EF_READ_A")
+    return ljm.eReadName(mb, f"AIN{tpin}_EF_READ_A")
 
 # --------------------------------------------------------
 # Calculates and returns the pressure using the current 
@@ -147,7 +162,7 @@ def read_pressure(prpin, resis, p_min, p_max):
 # --------------------------------------------------------
 def read_load(ldpin, v_off, kload, v_kload):
     factor = kload / (v_kload - v_off)
-    pin_v = ljm.eReadName(handle, f"AIN{ldpin}")
+    pin_v = ljm.eReadName(mb, f"AIN{ldpin}")
     return (pin_v - v_off) * factor
 
 # ================================
@@ -160,32 +175,46 @@ def read_load(ldpin, v_off, kload, v_kload):
 # moved, prints error if there is one.
 # --------------------------------------------------------
 def move(diopin_num, nextpos):
+    global curpos
     if nextpos == curpos:
-        print(Fore.RED + "MOVE COMMAND FAILED: ALREADY " + upper(curpos))
+        print(Fore.RED + "MOVE COMMAND FAILED: ALREADY " + curpos.upper())
         return False
     if nextpos == "open":
-        ljm.eWriteName(handle, f"DIO{diopin_num}_EF_CONFIG_A", openval)
+        ljm.eWriteName(mb, f"DIO{diopin_num}_EF_CONFIG_A", openval)
         curpos = nextpos
         return True
     elif nextpos == "closed":
-        ljm.eWriteName(handle, f"DIO{diopin_num}_EF_CONFIG_A", closedval)
+        ljm.eWriteName(mb, f"DIO{diopin_num}_EF_CONFIG_A", closedval)
         curpos = nextpos
         return True
     else:
-        print(Fore.RED + "MOVE COMMAND FAILED: " + str(upper(nextpos)) + " INVALID MOVEMENT COMMAND")
+        print(Fore.RED + "MOVE COMMAND FAILED: " + str(nextpos.upper()) + " INVALID MOVEMENT COMMAND")
         return False
+    
+def detect_move(pin):
+    if dread(pin) == 1 and last_mc == 0:
+        return True
+    return False
+
+def moveseq1(pin1):
+    # TBD
+    pass
+
+def moveseq2(pin2):
+    # TBD
+    pass
 
 # --------------------------------------------------------
 # Reads from DIO Pin.
 # --------------------------------------------------------
 def dread(diopin_num):
-    return ljm.eReadName(handle, f"DIO{diopin_num}")
+    return ljm.eReadName(mb, f"DIO{diopin_num}")
 
 # --------------------------------------------------------
 # Writes to DIO Pin, 0 for input, 1 for output.
 # --------------------------------------------------------
 def dwrite(diopin_num, state):
-    ljm.eWriteName(handle, f"DIO{diopin_num}_STATE", state)
+    ljm.eWriteName(mb, f"DIO{diopin_num}_STATE", state)
 
 # ================================
 # IGNITION FUNCTIONS
@@ -215,11 +244,11 @@ def is_ignition_safe(a, p, t, l, mp, mt, ml, mip, mit, mil):
 # firing and handling the result.
 # --------------------------------------------------------
 def fire_control(ipin, ftime, a, p, t, l, mp, mt, ml, mip, mit, mil):
-    if is_ignition_safe(a, p, t, l, mp, mt, ml):
+    if is_ignition_safe(a, p, t, l, mp, mt, ml, mip, mit, mil):
         if lastfire == 0:
-            print(Fore.ORANGE + "IGNITION ACTIVE")
+            print(Fore.YELLOW + "IGNITION ACTIVE")
             fire(ipin, ftime)
-            print(Fore.ORANGE + "IGNITION COMPLETE")
+            print(Fore.YELLOW + "IGNITION COMPLETE")
             return True
         else:
             print(Fore.RED + "IGNITION FAILED: NO CONSECUTIVE IGNITES")
@@ -244,7 +273,7 @@ def check_temperature(history, temperature):
     for i in history:
         sum += i
     sum = (sum+temperature)/(hist+1)
-    if sum < max_temp or sum > min_temp:
+    if sum > max_temp or sum < min_temp:
         return False
     return True
 
@@ -253,7 +282,7 @@ def check_pressure(history, pressure):
     for i in history:
         sum += i
     sum = (sum+pressure)/(hist+1)
-    if sum < max_pres or sum > min_pres:
+    if sum > max_pres or sum < min_pres:
         return False
     return True
 
@@ -262,20 +291,19 @@ def check_load(history, load):
     for i in history:
         sum += i
     sum = (sum+load)/(hist+1)
-    if sum < max_load or sum > min_load:
+    if sum > max_load or sum < min_load:
         return False
     return True
 
 def kill(safet, safep, safel, kill_pin):
     dwrite(kill_pin, 0)
     if not safet:
-        print(Fore.RED + "ABORTING: TEMPERATURE UNSAFE")
+        return Fore.RED + "ABORTING: TEMPERATURE UNSAFE. PLEASE RESET SYSTEM ONCE MANUALLY CONFIRMED SAFE"
     if not safep:
-        print(Fore.RED + "ABORTING: PRESSURE UNSAFE")
+        return Fore.RED + "ABORTING: PRESSURE UNSAFE. PLEASE RESET SYSTEM ONCE MANUALLY CONFIRMED SAFE"
     if not safel:
-        print(Fore.RED + "ABORTING: LOAD UNSAFE")
-    print(Fore.RED + "PLEASE RESET SYSTEM ONCE MANUALLY CONFIRMED SAFE")
-
+        return Fore.RED + "ABORTING: LOAD UNSAFE. PLEASE RESET SYSTEM ONCE MANUALLY CONFIRMED SAFE"
+    
 # ================================
 # CONFIGURATION
 # ================================
@@ -285,14 +313,16 @@ configure_thermocouple(tpin_pos_num, tpin_neg_num, trng, trind, tset, celsius)
 # Configure Pressure Sensing
 configure_transducer_loadcell(ppin_num, prng, prind)
 # Configure Load Sensing
-configure_transducer_loadcell(lpin_num, lrng, lind)
+configure_transducer_loadcell(lpin_num, lrng, lrind)
 # Configure the Servo Pins
+configure_clock(pwm_freq)
 configure_digital_io(servo1_pwm_pin, "output")
 configure_pwm(servo1_pwm_pin, startval)
 configure_digital_io(servo2_pwm_pin, "output")
 configure_pwm(servo2_pwm_pin, startval)
+configure_digital_io(movact_pin_num, "input")
 # Configure ignition pins
-configure_digital_io(ignite_in_pin, "input")
+configure_digital_io(fire_pin, "input")
 configure_digital_io(ignite_out_pin, "output")
 configure_digital_io(fire_pin, "input")
 
@@ -306,9 +336,12 @@ while not killed:
     load = read_load(lpin_num, v_off, kload, v_kload)
 
     warn = 0
+    safet = True
+    safep = True
+    safel = True
     if temp > max_temp or temp < min_temp:
         warn = 1
-        safet = check_temperature(past, temp)
+        safet = check_temperature(pastt, temp)
     if pres > max_pres or pres < min_pres:
         warn = 1
         safep = check_pressure(pastp, pres)
@@ -317,28 +350,36 @@ while not killed:
         safel = check_load(pastl, load)  
     if warn:
         if not (safet and safep and safel):
-            kill(safet, safep, safel, kill_pin_num)  
+            kill_message = kill(safet, safep, safel, kill_pin_num)  
             killed = True
+            raise SystemFault(kill_message)
         else:
-            print(Fore.ORANGE + "WARNING: POTENTIALLY UNSAFE CONDITIONS")
+            print(Fore.YELLOW + "WARNING: POTENTIALLY UNSAFE CONDITIONS")
 
-    # ================================
-    # MOVEMENT HANDLING HERE
-    # ================================
     if not killed:
+        idx = timestamp%hist
+        pastt[idx] = temp
+        pastp[idx] = pres
+        pastl[idx] = load
         armed = (dread(arm_pin) == 1)
         firing = (dread(fire_pin) == 1)
 
         if firing:
             if timestamp < hist:
-                did_fire = fire_control(ignite_out_pin, fire_time, pres, temp, load, max_pres, max_temp, max_load, min_pres, min_temp, min_load)
+                did_fire = fire_control(ignite_out_pin, fire_time, armed, pres, temp, load, max_pres, max_temp, max_load, min_pres, min_temp, min_load)
                 lastfire = int(did_fire)
             else:
                 print(Fore.RED + "IGNITION FAILED: SYSTEM NOT READY")
                 lastfire = 0
+        
+        movcom = detect_move(movact_pin_num)
+        if movcom:
+            movseq1(servo1_pwm_pin)
+            movseq2(servo2_pwm_pin)
 
         print(Fore.GREEN + "Temperature (C):", temp)
         print(Fore.GREEN + "Pressure (psi):", pres)
         print(Fore.GREEN + "Force:", load)
 
+        timestamp += 1
         time.sleep(0.1)
