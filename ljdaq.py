@@ -43,6 +43,13 @@ handle = ljm.openS("T7", "ANY", "ANY")
 # CONFIG FUNCTIONS
 # ================================
 
+# --------------------------------------------------------
+# Configures a thermocoupler to read differential voltage between
+# ppin and npin. Rng is the max voltage this can read, rind is 
+# the resolution of the measurement, sett is settling time
+# and temp is the unit (e.g. celsius or farenheit)
+# --------------------------------------------------------
+
 def configure_thermocouple(ppin, npin, rng, rind, sett, temp):
     pos_name = f"AIN{ppin}"
     neg_name = f"AIN{ppin}_NEGATIVE_CH"
@@ -54,6 +61,11 @@ def configure_thermocouple(ppin, npin, rng, rind, sett, temp):
     ljm.eWriteName(handle, f"{pos_name}_EF_INDEX", 22)
     ljm.eWriteName(handle, f"{pos_name}_EF_CONFIG_A", temp)
 
+# --------------------------------------------------------
+# Configures either a transducer or a loadcell since they
+# are done the same. Connects to AIN apin with range rng 
+# and resolution rind. The voltage is compared to GND.
+#---------------------------------------------------------
 def configure_transducer_loadcell(apin, rng, rind):
     ain_name = f"AIN{apin}"
     ljm.eWriteName(handle, f"{ain_name}_NEGATIVE_CH", 199)
@@ -61,6 +73,10 @@ def configure_transducer_loadcell(apin, rng, rind):
     ljm.eWriteName(handle, f"{ain_name}_RESOLUTION_INDEX", rind)
     ljm.eWriteName(handle, f"{ain_name}_SETTLING_US", 0)
 
+# --------------------------------------------------------
+# Configures a pin as digital I/O, with the function func.
+# func MUST BE either 'input' or 'ouput'.
+# --------------------------------------------------------
 def configure_digital_io(diopin_num, func):
     if func == "input":
         ljm.eWriteName(handle, f"DIO{diopin_num}_DIRECTION", 0)
@@ -68,6 +84,10 @@ def configure_digital_io(diopin_num, func):
         ljm.eWriteName(handle, f"DIO{diopin_num}_DIRECTION", 1)
         ljm.eWriteName(handle, f"DIO{diopin_num}_STATE", 0)
 
+# --------------------------------------------------------
+# Configures a DIO pin to output pwm at 50 HZ and start
+# value startval
+# --------------------------------------------------------
 def configure_pwm(diopin_num, startval):
     ljm.eWriteName(handle, "DIO_EF_CLOCK0_ENABLE", 0)
     ljm.eWriteName(handle, "DIO_EF_CLOCK0_DIVISOR", 1)
@@ -84,20 +104,40 @@ def configure_pwm(diopin_num, startval):
 # MEASUREMENT FUNCTIONS
 # ================================
 
+# --------------------------------------------------------
+# Measures and returns transducer current by diving measured 
+# voltage by known resistance (Ohm's Law).
+# --------------------------------------------------------
 def measure_transducer_current(apin, resistance):
     voltage = ljm.eReadName(handle, f"AIN{apin}")
     return voltage / resistance
 
+# --------------------------------------------------------
+# Converts transducer current to pressure and returns
+# --------------------------------------------------------
 def current_to_pressure(current, pmin, pmax):
     return ((current - 0.004) / 0.016) * (pmax - pmin) + pmin
 
+# --------------------------------------------------------
+# Measures the temperature by reading TC pin. Returns temp.
+# --------------------------------------------------------
 def read_temperature(tpin):
     return ljm.eReadName(handle, f"AIN{tpin}_EF_READ_A")
 
+# --------------------------------------------------------
+# Calculates and returns the pressure using the current 
+# and conversion functions.
+# --------------------------------------------------------
 def read_pressure(prpin, resis, p_min, p_max):
     c = measure_transducer_current(prpin, resis)
     return current_to_pressure(c, p_min, p_max)
 
+# --------------------------------------------------------
+# Reads the load cell load using by calculating a scaling
+# factor with a known load and its voltage as well as the 
+# offset (0 load) voltage and using a formula with the 
+# measured pin voltage.
+# --------------------------------------------------------
 def read_load(ldpin, v_off, kload, v_kload):
     factor = kload / (v_kload - v_off)
     pin_v = ljm.eReadName(handle, f"AIN{ldpin}")
@@ -107,19 +147,36 @@ def read_load(ldpin, v_off, kload, v_kload):
 # DIGITAL / SERVO FUNCTIONS
 # ================================
 
+# --------------------------------------------------------
+# Moves the servo motors between two positons. nextpos 
+# MUST BE either 'open' or 'closed'. Returns whether motor
+# moved, prints error if there is one.
+# --------------------------------------------------------
 def move(diopin_num, nextpos):
     if nextpos == curpos:
-        return
+        print(Fore.RED + "MOVE COMMAND FAILED: ALREADY " + upper(curpos))
+        return False
     if nextpos == "open":
         ljm.eWriteName(handle, f"DIO{diopin_num}_EF_CONFIG_A", openval)
-    else:
+        curpos = nextpos
+        return True
+    else if nextpos == "closed":
         ljm.eWriteName(handle, f"DIO{diopin_num}_EF_CONFIG_A", closedval)
-    curpos = nextpos
+        curpos = nextpos
+        return True
+    else:
+        print(Fore.RED + "MOVE COMMAND FAILED: " + str(upper(nextpos)) + " INVALID MOVEMENT COMMAND")
+        return False
 
-
+# --------------------------------------------------------
+# Reads from DIO Pin.
+# --------------------------------------------------------
 def dread(diopin_num):
     return ljm.eReadName(handle, f"DIO{diopin_num}")
 
+# --------------------------------------------------------
+# Writes to DIO Pin, 0 for input, 1 for output.
+# --------------------------------------------------------
 def dwrite(diopin_num, state):
     ljm.eWriteName(handle, f"DIO{diopin_num}_STATE", state)
 
@@ -127,22 +184,30 @@ def dwrite(diopin_num, state):
 # IGNITION FUNCTIONS
 # ================================
 
-def is_ignition_safe(a, p, t, l, mp, mt, ml):
+# --------------------------------------------------------
+# Checks if armed, and measurements are within range before
+# firing.
+# --------------------------------------------------------
+def is_ignition_safe(a, p, t, l, mp, mt, ml, mip, mit, mil):
     if not a:
         print(Fore.RED + "IGNITION FAILURE: SYSTEM NOT ARMED")
         return False
-    if p > mp:
+    if p > mp or p < mip:
         print(Fore.RED + "IGNITION FAILURE: PRESSURE TOO LARGE")
         return False
-    if t > mt:
+    if t > mt or t < mit:
         print(Fore.RED + "IGNITION FAILURE: TEMPERATURE TOO HIGH")
         return False
-    if l > ml:
+    if l > ml or l < mil:
         print(Fore.RED + "IGNITION FAILURE: LOAD TOO HIGH")
         return False
     return True
 
-def fire_control(ipin, ftime, a, p, t, l, mp, mt, ml):
+# --------------------------------------------------------
+# Control function for firing, checking safety before
+# firing and handling the result.
+# --------------------------------------------------------
+def fire_control(ipin, ftime, a, p, t, l, mp, mt, ml, mip, mit, mil):
     if is_ignition_safe(a, p, t, l, mp, mt, ml):
         if lastfire == 0:
             print(Fore.ORANGE + "IGNITION ACTIVE")
@@ -155,6 +220,9 @@ def fire_control(ipin, ftime, a, p, t, l, mp, mt, ml):
     else:
         return False
 
+# --------------------------------------------------------
+# Fires for time ftime.
+# --------------------------------------------------------
 def fire(ipin, ftime):
     dwrite(ipin, 1)
     time.sleep(ftime)
@@ -189,11 +257,19 @@ while True:
     pres = read_pressure(ppin_num, res_val, pmin, pmax)
     load = read_load(lpin_num, v_off, kload, v_kload)
 
+    # ================================
+    # SAFETY CHECKING/HISTORY HERE
+    # ================================
+
+    # ================================
+    # MOVEMENT HANDLING HERE
+    # ================================
+
     armed = (dread(arm_pin) == 1)
     firing = (dread(fire_pin) == 1)
 
     if firing:
-        did_fire = fire_control(ignite_out_pin, fire_time, pres, temp, load, max_pres, max_temp, max_load)
+        did_fire = fire_control(ignite_out_pin, fire_time, pres, temp, load, max_pres, max_temp, max_load, min_pres, min_temp, min_load)
         lastfire = int(did_fire)
 
     print(Fore.GREEN + "Temperature (C):", temp)
