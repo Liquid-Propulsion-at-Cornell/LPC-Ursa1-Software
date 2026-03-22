@@ -10,34 +10,41 @@ import time
 handle = ljm.openS("T7", "ANY", "ANY")
 
 # GLOBAL CONSTANTS
-# global celsius = 1
-# global farenheit = 2
-# global tpin_pos_num =
-# global tpin_neg_num =
-# global trng =
-# global trind =
-# global tset =
-# global ppin_num =
-# global prng =
-# global prind =
-# global lpin_num =
-# global lrng =
-# global lrind =
-# global pmax =
-# global pmin =
-# global kload =
-# global v_kload =
-# global res_val =
-# global arm_pin =
-# global fire_pin =
-# global ignite_out_pin =
-# global servo1_pwm_pin =
-# global servo2_pwm_pin =
-# global curpos =
-# global startval =
-# global openval =
-# global closedval =
-# global lastfire =
+killed = False
+timestamp = 0
+celsius = 1
+farenheit = 2
+pastt = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+pastp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+pastl = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+hist = 10
+# kill_pin_num = 
+# tpin_pos_num =
+# tpin_neg_num =
+# trng =
+# trind =
+# tset =
+# ppin_num =
+# prng =
+# prind =
+# lpin_num =
+# lrng =
+# lrind =
+# pmax =
+# pmin =
+# kload =
+# v_kload =
+# res_val =
+# arm_pin =
+# fire_pin =
+# ignite_out_pin =
+# servo1_pwm_pin =
+# servo2_pwm_pin =
+# curpos =
+# startval =
+# openval =
+# closedval =
+# lastfire =
 
 # ================================
 # CONFIG FUNCTIONS
@@ -160,7 +167,7 @@ def move(diopin_num, nextpos):
         ljm.eWriteName(handle, f"DIO{diopin_num}_EF_CONFIG_A", openval)
         curpos = nextpos
         return True
-    else if nextpos == "closed":
+    elif nextpos == "closed":
         ljm.eWriteName(handle, f"DIO{diopin_num}_EF_CONFIG_A", closedval)
         curpos = nextpos
         return True
@@ -229,6 +236,50 @@ def fire(ipin, ftime):
     dwrite(ipin, 0)
 
 # ================================
+# SAFETY FUNCTIONS
+# ================================
+
+def check_temperature(history, temperature):
+    sum = 0
+    for i in history:
+        sum += i
+    sum = (sum+temperature)/(hist+1)
+    if sum < max_temp or sum > min_temp:
+        return False
+    return True
+
+def check_pressure(history, pressure):
+    sum = 0
+    for i in history:
+        sum += i
+    sum = (sum+pressure)/(hist+1)
+    if sum < max_pres or sum > min_pres:
+        return False
+    return True
+
+def check_load(history, load):
+    sum = 0
+    for i in history:
+        sum += i
+    sum = (sum+load)/(hist+1)
+    if sum < max_load or sum > min_load:
+        return False
+    return True
+
+def kill(safet, safep, safel, kill_pin):
+    dwrite(kill_pin, 0)
+    if not safet:
+        print(Fore.RED + "ABORTING: TEMPERATURE UNSAFE")
+    if not safep:
+        print(Fore.RED + "ABORTING: PRESSURE UNSAFE")
+    if not safel:
+        print(Fore.RED + "ABORTING: LOAD UNSAFE")
+
+def resume(kill_pin):
+    dwrite(kill_pin, 1)
+    killed = False
+
+# ================================
 # CONFIGURATION
 # ================================
 
@@ -257,23 +308,42 @@ while True:
     pres = read_pressure(ppin_num, res_val, pmin, pmax)
     load = read_load(lpin_num, v_off, kload, v_kload)
 
-    # ================================
-    # SAFETY CHECKING/HISTORY HERE
-    # ================================
+    warn = 0
+    if temp > max_temp or temp < min_temp:
+        warn = 1
+        safet = check_temperature(past, temp)
+    if pres > max_pres or pres < min_pres:
+        warn = 1
+        safep = check_pressure(pastp, pres)
+    if load > max_load or load < min_load:
+        warn = 1
+        safel = check_load(pastl, load)  
+    if warn:
+        if not (safet and safep and safel):
+            kill(safet, safep, safel, kill_pin_num)  
+            killed = True
+        else:
+            print(Fore.ORANGE + "WARNING: POTENTIALLY UNSAFE CONDITIONS")
+    elif not warn and killed:
+        resume(kill_pin_num)
 
     # ================================
     # MOVEMENT HANDLING HERE
     # ================================
+    if not killed:
+        armed = (dread(arm_pin) == 1)
+        firing = (dread(fire_pin) == 1)
 
-    armed = (dread(arm_pin) == 1)
-    firing = (dread(fire_pin) == 1)
+        if firing:
+            if timestamp < hist:
+                did_fire = fire_control(ignite_out_pin, fire_time, pres, temp, load, max_pres, max_temp, max_load, min_pres, min_temp, min_load)
+                lastfire = int(did_fire)
+            else:
+                print(Fore.RED + "IGNITION FAILED: SYSTEM NOT READY")
+                lastfire = 0
 
-    if firing:
-        did_fire = fire_control(ignite_out_pin, fire_time, pres, temp, load, max_pres, max_temp, max_load, min_pres, min_temp, min_load)
-        lastfire = int(did_fire)
+        print(Fore.GREEN + "Temperature (C):", temp)
+        print(Fore.GREEN + "Pressure (psi):", pres)
+        print(Fore.GREEN + "Force:", load)
 
-    print(Fore.GREEN + "Temperature (C):", temp)
-    print(Fore.GREEN + "Pressure (psi):", pres)
-    print(Fore.GREEN + "Force:", load)
-
-    time.sleep(0.1)
+        time.sleep(0.1)
