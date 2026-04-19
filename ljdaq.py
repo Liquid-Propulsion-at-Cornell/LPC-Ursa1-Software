@@ -69,6 +69,7 @@ FAHRENHEIT = 2
 # v5_close_pwm =
 # v6_close_pwm =   # V6 has no open_pwm — dropping EF enable is how it opens
 # ignite_pin =
+# kill_pin =       # digital output: normally HIGH; write LOW on abort to cut main 12V bus
 # start_pin =      # digital input: rising edge starts sequence (STATE 1 → 2)
 # arm_pin =        # digital input: rising edge in STATE 4 authorizes fire
 
@@ -313,6 +314,7 @@ def abort(reason=""):
     move(v5_pin, "closed", v5_open_pwm, v5_close_pwm)
     v6_release()
     fire_off()
+    dwrite(kill_pin, 0)
     system_state = STATE_ABORT
     print(Fore.RED + ("ABORT" + (f": {reason}" if reason else "")))
     print(Fore.RED + "MANUAL RESET REQUIRED")
@@ -492,6 +494,8 @@ for pin in [v1_pin, v2_pin, v3_pin, v4_pin, v5_pin, v6_pin]:
     configure_digital_io(pin, "output")
     configure_pwm(pin, startval)
 configure_digital_io(ignite_pin, "output")
+configure_digital_io(kill_pin,   "output")
+ljm.eWriteName(mb, f"DIO{kill_pin}_STATE", 1)  # bus live at startup
 configure_digital_io(arm_pin,    "input")
 configure_digital_io(start_pin,  "input")
 
