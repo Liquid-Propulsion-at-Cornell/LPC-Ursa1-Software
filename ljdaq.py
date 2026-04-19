@@ -266,6 +266,7 @@ def run_safety_checks(tc1, tc2, pt1, pt2, pt3, pt4, load):
     hists_t = [pastt1, pastt2]
     hists_p = [pastp1, pastp2, pastp3, pastp4]
 
+    if system_state != STATE_HOT_FIRE
     for t, h in zip(temps, hists_t):
         if not check_rate_of_change(h, t, max_temp_rate):
             return False, "TEMPERATURE RATE OF CHANGE EXCEEDED"
