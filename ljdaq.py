@@ -1,122 +1,157 @@
 # LPC LABJACK T7 PYTHON CONFIG SCRIPT
 # Author: Thomas Tedeschi
-# Last Update Date: 3/22/2026
+# Last Update Date: 4/19/2026
 
 from labjack import ljm
 from colorama import Fore, Style, init
 import time
 import numpy as np
 
-# Open LabJack
 mb = ljm.openS("T7", "ANY", "ANY")
 
-# GLOBAL CONSTANTS
-killed = False
-timestamp = 0
-celsius = 1
-farenheit = 2
-hist = 10
-pastt = np.zeros(hist)
-pastp = np.zeros(hist)
-pastl = np.zeros(hist)
-last_mc = 0
-SERVO_IDLE   = 0
-SERVO_STAGE1 = 1  
-SERVO_STAGE2 = 2 
-servo_state  = SERVO_IDLE
-servo_timer  = 0
+# ================================
+# FSM STATES
+# ================================
+STATE_ABORT           = 0
+STATE_COLD_OPS        = 1
+STATE_PRE_FIRE_PURGE  = 2
+STATE_FILL            = 3
+STATE_STATE_CHECK     = 4
+STATE_HOT_FIRE        = 5
+STATE_POST_FIRE_PURGE = 6
+STATE_VENT_SAFING     = 7
+
+# ================================
+# UNIT CONSTANTS
+# ================================
+CELSIUS    = 1
+FAHRENHEIT = 2
+
+# ================================
+# HARDWARE PIN ASSIGNMENTS
+# ================================
 # pwm_freq =
-# kill_pin_num =
-# tpin_pos_num =
-# tpin_neg_num =
-# trng =
-# trind =
-# tset =
-# ppin_num =
-# prng =
-# prind =
-# lpin_num =
-# lrng =
-# lrind =
-# pmax =
-# pmin =
-# kload =
-# v_kload =
-# res_val =
-# arm_pin =
-# safety_arm_pin =
-# fire_pin =
-# ignite_out_pin =
-# servo1_pwm_pin =
-# servo2_pwm_pin =
-# curpos =
-# startval =
-# openval =
-# movact_pin_num
-# closedval =
-# lastfire =
-# v_off
-# fire_time
+# tc1_pin_pos =
+# tc1_pin_neg =
+# tc2_pin_pos =
+# tc2_pin_neg =
+# tc_rng =
+# tc_rind =
+# tc_sett =
+# pt1_pin =        # Fuel tank PT
+# pt2_pin =        # Ox tank PT
+# pt3_pin =        # Chamber PT
+# pt4_pin =        # Supply PT
+# pt_rng =
+# pt_rind =
+# pt_res_val =     # shunt resistor (ohms)
+# lc_pin =
+# lc_rng =
+# lc_rind =
+# v_off =          # load cell zero voltage
+# kload =          # known calibration load (units)
+# v_kload =        # voltage at kload
+# v1_pin =         # Main Fuel valve     (two-way, powered=OPEN)
+# v2_pin =         # Main Ox valve       (two-way, powered=OPEN)
+# v3_pin =         # Fill valve          (two-way, powered=OPEN)
+# v4_pin =         # Purge A             (two-way, powered=OPEN)
+# v5_pin =         # Purge B             (two-way, powered=OPEN)
+# v6_pin =         # Vent                (auto-return, unpowered=OPEN, powered=CLOSED)
+# v1_open_pwm =
+# v1_close_pwm =
+# v2_open_pwm =
+# v2_close_pwm =
+# v3_open_pwm =
+# v3_close_pwm =
+# v4_open_pwm =
+# v4_close_pwm =
+# v5_open_pwm =
+# v5_close_pwm =
+# v6_close_pwm =   # V6 has no open_pwm — dropping EF enable is how it opens
+# ignite_pin =
+# start_pin =      # digital input: rising edge starts sequence (STATE 1 → 2)
+# arm_pin =        # digital input: rising edge in STATE 4 authorizes fire
 
-# Safety thresholds — warning band triggers a log message, fault band triggers a kill
-# warn_temp_max =
-# warn_temp_min =
-# fault_temp_max =
-# fault_temp_min =
-# warn_pres_max =
-# warn_pres_min =
-# fault_pres_max =
-# fault_pres_min =
-# warn_load_max =
-# warn_load_min =
-# fault_load_max =
-# fault_load_min =
+# startval =       # initial PWM value written to all servo pins on boot
 
-# Max allowed per-sample change before triggering a fault
-# max_temp_rate =
+# ================================
+# SEQUENCE TIMING
+# ================================
+# Purge_Time =              # seconds — pre/post fire purge duration
+# Delay_1 =                 # seconds — igniter ON → V1 open
+# Delay_2 =                 # seconds — V1 open → V2 open
+# Burn_Duration =           # seconds — V2 open → close all + igniter off
+# Ignition_Confirm_Time =   # seconds — window after V2 open to confirm ignition
+
+# ================================
+# PRESSURE PARAMETERS
+# ================================
+# pt1_pmin =   pt1_pmax =   # Fuel tank PT range (psi)
+# pt2_pmin =   pt2_pmax =   # Ox tank PT range (psi)
+# pt3_pmin =   pt3_pmax =   # Chamber PT range (psi)
+# pt4_pmin =   pt4_pmax =   # Supply PT range (psi)
+# MEOP =                    # Ox tank fill cutoff pressure (psi)
+# Max_Chamber_Pressure =    # Hard start abort limit (psi)
+# Min_Ignition_Pressure =   # Min chamber pressure after V2 open to confirm ignition
+
+# ================================
+# SAFETY THRESHOLDS
+# ================================
+# warn_temp_max =    warn_temp_min =
+# fault_temp_max =   fault_temp_min =
+# warn_pres_max =    warn_pres_min =
+# fault_pres_max =   fault_pres_min =
+# warn_load_max =    warn_load_min =
+# fault_load_max =   fault_load_min =
+# max_temp_rate =    # max per-sample delta before fault
 # max_pres_rate =
 # max_load_rate =
+# amb =              # expected ambient temperature (C) for cold ops / vent safing checks
+# tdiff =            # allowable TC deviation from ambient (C)
+# pdiff =            # allowable PT deviation from 0 psig
 
-REQUIRED_SAFE = 5  # consecutive clean readings before clearing a fault
+REQUIRED_SAFE = 5
+HIST          = 10
+
+# ================================
+# RUNTIME STATE
+# ================================
+system_state    = STATE_COLD_OPS
+state_timer     = -1.0   # -1.0 = not yet entered current state
+hot_fire_step   = 0      # sub-step within STATE_HOT_FIRE (0–3)
+ignite          = False
+fire_authorized = False
+timestamp       = 0
+
+pastt1 = np.zeros(HIST)
+pastt2 = np.zeros(HIST)
+pastp1 = np.zeros(HIST)
+pastp2 = np.zeros(HIST)
+pastp3 = np.zeros(HIST)
+pastp4 = np.zeros(HIST)
+pastl  = np.zeros(HIST)
+
 
 # ================================
 # EXCEPTIONS
 # ================================
-
-# --------------------------------------------------------
-# Abort sequence error to crash the program and force a 
-# manual restart.
-# --------------------------------------------------------
 class SystemFault(Exception):
     pass
+
 
 # ================================
 # CONFIG FUNCTIONS
 # ================================
 
-# --------------------------------------------------------
-# Configures a thermocoupler to read differential voltage between
-# ppin and npin. Rng is the max voltage this can read, rind is 
-# the resolution of the measurement, sett is settling time
-# and temp is the unit (e.g. celsius or farenheit)
-# --------------------------------------------------------
-
-def configure_thermocouple(ppin, npin, rng, rind, sett, temp):
+def configure_thermocouple(ppin, npin, rng, rind, sett, temp_unit):
     pos_name = f"AIN{ppin}"
-    neg_name = f"AIN{ppin}_NEGATIVE_CH"
-
-    ljm.eWriteName(mb, neg_name, npin)
+    ljm.eWriteName(mb, f"AIN{ppin}_NEGATIVE_CH", npin)
     ljm.eWriteName(mb, f"{pos_name}_RANGE", rng)
     ljm.eWriteName(mb, f"{pos_name}_RESOLUTION_INDEX", rind)
     ljm.eWriteName(mb, f"{pos_name}_SETTLING_US", sett)
     ljm.eWriteName(mb, f"{pos_name}_EF_INDEX", 22)
-    ljm.eWriteName(mb, f"{pos_name}_EF_CONFIG_A", temp)
+    ljm.eWriteName(mb, f"{pos_name}_EF_CONFIG_A", temp_unit)
 
-# --------------------------------------------------------
-# Configures either a transducer or a loadcell since they
-# are done the same. Connects to AIN apin with range rng 
-# and resolution rind. The voltage is compared to GND.
-#---------------------------------------------------------
 def configure_transducer_loadcell(apin, rng, rind):
     ain_name = f"AIN{apin}"
     ljm.eWriteName(mb, f"{ain_name}_NEGATIVE_CH", 199)
@@ -124,10 +159,6 @@ def configure_transducer_loadcell(apin, rng, rind):
     ljm.eWriteName(mb, f"{ain_name}_RESOLUTION_INDEX", rind)
     ljm.eWriteName(mb, f"{ain_name}_SETTLING_US", 0)
 
-# --------------------------------------------------------
-# Configures a pin as digital I/O, with the function func.
-# func MUST BE either 'input' or 'output'.
-# --------------------------------------------------------
 def configure_digital_io(diopin_num, func):
     if func == "input":
         ljm.eWriteName(mb, f"DIO{diopin_num}_DIRECTION", 0)
@@ -135,343 +166,376 @@ def configure_digital_io(diopin_num, func):
         ljm.eWriteName(mb, f"DIO{diopin_num}_DIRECTION", 1)
         ljm.eWriteName(mb, f"DIO{diopin_num}_STATE", 0)
 
-# --------------------------------------------------------
-# Configures the board clock at frequency freq.
-# --------------------------------------------------------
 def configure_clock(freq):
     ljm.eWriteName(mb, "DIO_EF_CLOCK0_ENABLE", 0)
     ljm.eWriteName(mb, "DIO_EF_CLOCK0_DIVISOR", 1)
-    ljm.eWriteName(mb, "DIO_EF_CLOCK0_ROLL_VALUE", 80000000/freq)
+    ljm.eWriteName(mb, "DIO_EF_CLOCK0_ROLL_VALUE", 80000000 / freq)
     ljm.eWriteName(mb, "DIO_EF_CLOCK0_ENABLE", 1)
 
-# --------------------------------------------------------
-# Configures a DIO pin to output pwm at 50 HZ and start
-# value startval
-# --------------------------------------------------------
-def configure_pwm(diopin_num, startval):
+def configure_pwm(diopin_num, val):
     ljm.eWriteName(mb, f"DIO{diopin_num}_EF_ENABLE", 0)
     ljm.eWriteName(mb, f"DIO{diopin_num}_EF_INDEX", 0)
     ljm.eWriteName(mb, f"DIO{diopin_num}_EF_OPTIONS", 0)
-    ljm.eWriteName(mb, f"DIO{diopin_num}_EF_CONFIG_A", startval)
+    ljm.eWriteName(mb, f"DIO{diopin_num}_EF_CONFIG_A", val)
     ljm.eWriteName(mb, f"DIO{diopin_num}_EF_ENABLE", 1)
+
 
 # ================================
 # MEASUREMENT FUNCTIONS
 # ================================
 
-# --------------------------------------------------------
-# Measures and returns transducer current by diving measured 
-# voltage by known resistance (Ohm's Law).
-# --------------------------------------------------------
 def measure_transducer_current(apin, resistance):
-    voltage = ljm.eReadName(mb, f"AIN{apin}")
-    return voltage / resistance
+    return ljm.eReadName(mb, f"AIN{apin}") / resistance
 
-# --------------------------------------------------------
-# Converts transducer current to pressure and returns
-# --------------------------------------------------------
 def current_to_pressure(current, pmin, pmax):
     return ((current - 0.004) / 0.016) * (pmax - pmin) + pmin
 
-# --------------------------------------------------------
-# Measures the temperature by reading TC pin. Returns temp.
-# --------------------------------------------------------
 def read_temperature(tpin):
     return ljm.eReadName(mb, f"AIN{tpin}_EF_READ_A")
 
-# --------------------------------------------------------
-# Calculates and returns the pressure using the current 
-# and conversion functions.
-# --------------------------------------------------------
 def read_pressure(prpin, resis, p_min, p_max):
-    c = measure_transducer_current(prpin, resis)
-    return current_to_pressure(c, p_min, p_max)
+    return current_to_pressure(measure_transducer_current(prpin, resis), p_min, p_max)
 
-# --------------------------------------------------------
-# Reads the load cell load using by calculating a scaling
-# factor with a known load and its voltage as well as the 
-# offset (0 load) voltage and using a formula with the 
-# measured pin voltage.
-# --------------------------------------------------------
 def read_load(ldpin, v_off, kload, v_kload):
     factor = kload / (v_kload - v_off)
-    pin_v = ljm.eReadName(mb, f"AIN{ldpin}")
-    return (pin_v - v_off) * factor
+    return (ljm.eReadName(mb, f"AIN{ldpin}") - v_off) * factor
+
 
 # ================================
-# DIGITAL / SERVO FUNCTIONS
+# VALVE / SERVO FUNCTIONS
 # ================================
 
-# --------------------------------------------------------
-# Moves the servo motors between two positons. nextpos 
-# MUST BE either 'open' or 'closed'. Returns whether motor
-# moved, prints error if there is one.
-# --------------------------------------------------------
-def move(diopin_num, nextpos, curpos):
-    if nextpos == curpos:
-        print(Fore.RED + "MOVE COMMAND FAILED: ALREADY " + curpos.upper())
-        return False
-    if nextpos == "open":
-        ljm.eWriteName(mb, f"DIO{diopin_num}_EF_CONFIG_A", openval)
-        curpos = nextpos
-        return True
-    elif nextpos == "closed":
-        ljm.eWriteName(mb, f"DIO{diopin_num}_EF_CONFIG_A", closedval)
-        curpos = nextpos
-        return True
+def move(pin, target, open_pwm, close_pwm):
+    if target == "open":
+        ljm.eWriteName(mb, f"DIO{pin}_EF_CONFIG_A", open_pwm)
+    elif target == "closed":
+        ljm.eWriteName(mb, f"DIO{pin}_EF_CONFIG_A", close_pwm)
     else:
-        print(Fore.RED + "MOVE COMMAND FAILED: " + str(nextpos.upper()) + " INVALID MOVEMENT COMMAND")
-        return False
+        print(Fore.RED + f"MOVE FAILED: INVALID TARGET '{target}'")
 
-# --------------------------------------------------------
-# Detects whether a valid move command has come in. 
-# move commands must be on a rising edge.
-# --------------------------------------------------------    
-def detect_move(pin):
-    if dread(pin) == 1 and last_mc == 0:
-        return True
-    return False
+def v6_power_closed():
+    ljm.eWriteName(mb, f"DIO{v6_pin}_EF_CONFIG_A", v6_close_pwm)
 
-# --------------------------------------------------------
-# Controlled movement of servos.
-# --------------------------------------------------------
-def moveseq_start(pin1, pin2):
-    global servo_state, servo_timer
-    move(pin1, target)
-    move(pin2, target)
-    servo_state = SERVO_STAGE1
-    servo_timer = time.time()
+def v6_release():
+    # Drop PWM — spring returns V6 to open (vent/dump)
+    ljm.eWriteName(mb, f"DIO{v6_pin}_EF_ENABLE", 0)
 
-def moveseq_update(pin1, pin2):
-    global servo_state
-    if servo_state == SERVO_STAGE1:
-        if time.time() - servo_timer >= stroke_time:
-            move(pin1, next_target)
-            move(pin2, next_target)
-            servo_state = SERVO_STAGE2
-# --------------------------------------------------------
-# Reads from DIO Pin.
-# --------------------------------------------------------
 def dread(diopin_num):
     return ljm.eReadName(mb, f"DIO{diopin_num}")
 
-# --------------------------------------------------------
-# Writes to DIO Pin, 0 for input, 1 for output.
-# --------------------------------------------------------
 def dwrite(diopin_num, state):
     ljm.eWriteName(mb, f"DIO{diopin_num}_STATE", state)
+
 
 # ================================
 # IGNITION FUNCTIONS
 # ================================
 
-# --------------------------------------------------------
-# Checks if armed, and measurements are within range before
-# firing.
-# --------------------------------------------------------
-def is_ignition_safe(a, p, t, l, mp, mt, ml, mip, mit, mil):
-    if not a:
-        print(Fore.RED + "IGNITION FAILURE: SYSTEM NOT ARMED")
-        return False
-    if p > mp or p < mip:
-        print(Fore.RED + "IGNITION FAILURE: PRESSURE OUT OF RANGE")
-        return False
-    if t > mt or t < mit:
-        print(Fore.RED + "IGNITION FAILURE: TEMPERATURE TOO HIGH")
-        return False
-    if l > ml or l < mil:
-        print(Fore.RED + "IGNITION FAILURE: LOAD TOO HIGH")
-        return False
-    return True
+def fire_on():
+    global ignite
+    dwrite(ignite_pin, 1)
+    ignite = True
+    print(Fore.YELLOW + "IGNITION ACTIVE")
 
-# --------------------------------------------------------
-# Control function for firing, checking safety before
-# firing and handling the result.
-# --------------------------------------------------------
-def fire_control(ipin, ftime, a, p, t, l, mp, mt, ml, mip, mit, mil):
-    if is_ignition_safe(a, p, t, l, mp, mt, ml, mip, mit, mil):
-        if lastfire == 0:
-            print(Fore.YELLOW + "IGNITION ACTIVE")
-            fire(ipin, ftime)
-            print(Fore.YELLOW + "IGNITION COMPLETE")
-            return True
-        else:
-            print(Fore.RED + "IGNITION FAILED: NO CONSECUTIVE IGNITES")
-            return False
-    else:
-        return False
+def fire_off():
+    global ignite
+    dwrite(ignite_pin, 0)
+    ignite = False
+    print(Fore.YELLOW + "IGNITION OFF")
 
-# --------------------------------------------------------
-# Fires for time ftime.
-# --------------------------------------------------------
-def fire(ipin, ftime):
-    dwrite(ipin, 1)
-    time.sleep(ftime)
-    dwrite(ipin, 0)
 
 # ================================
 # SAFETY FUNCTIONS
 # ================================
 
-# --------------------------------------------------------
-# Checks if the per-sample change in a reading exceeds
-# max_delta. Returns False if the rate of change is too
-# large. Skips the check on the first sample.
-# --------------------------------------------------------
 def check_rate_of_change(history, current, max_delta):
     if timestamp == 0:
         return True
-    last = history[(timestamp - 1) % hist]
+    last = history[(timestamp - 1) % HIST]
     return abs(current - last) <= max_delta
 
-# --------------------------------------------------------
-# Averages current temperature with the populated history
-# window and checks against fault bounds.
-# --------------------------------------------------------
-def check_temperature(history, temperature):
-    count = min(timestamp, hist)
-    avg = (np.sum(history[:count]) + temperature) / (count + 1)
-    return fault_temp_min <= avg <= fault_temp_max
+def check_sensor_avg(history, current, lo, hi):
+    count = min(timestamp, HIST)
+    avg = (np.sum(history[:count]) + current) / (count + 1)
+    return lo <= avg <= hi
 
-# --------------------------------------------------------
-# Averages current pressure with the populated history
-# window and checks against fault bounds.
-# --------------------------------------------------------
-def check_pressure(history, pressure):
-    count = min(timestamp, hist)
-    avg = (np.sum(history[:count]) + pressure) / (count + 1)
-    return fault_pres_min <= avg <= fault_pres_max
+def run_safety_checks(tc1, tc2, pt1, pt2, pt3, pt4, load):
+    temps   = [tc1, tc2]
+    presses = [pt1, pt2, pt3, pt4]
+    hists_t = [pastt1, pastt2]
+    hists_p = [pastp1, pastp2, pastp3, pastp4]
 
-# --------------------------------------------------------
-# Averages current load with the populated history
-# window and checks against fault bounds.
-# --------------------------------------------------------
-def check_load(history, load):
-    count = min(timestamp, hist)
-    avg = (np.sum(history[:count]) + load) / (count + 1)
-    return fault_load_min <= avg <= fault_load_max
+    for t, h in zip(temps, hists_t):
+        if not check_rate_of_change(h, t, max_temp_rate):
+            return False, "TEMPERATURE RATE OF CHANGE EXCEEDED"
+        if not check_sensor_avg(h, t, fault_temp_min, fault_temp_max):
+            return False, "TEMPERATURE OUT OF FAULT BOUNDS"
+        if not (warn_temp_min <= t <= warn_temp_max):
+            print(Fore.YELLOW + "WARNING: TEMPERATURE APPROACHING LIMITS")
 
-# --------------------------------------------------------
-# Kills the current running sequence by shutting off
-# a power pin, sending an abort message.
-# --------------------------------------------------------
-def kill(safet, safep, safel, kill_pin):
-    dwrite(kill_pin, 0)
-    if not safet:
-        return Fore.RED + "ABORTING: TEMPERATURE UNSAFE. PLEASE RESET SYSTEM ONCE MANUALLY CONFIRMED SAFE"
-    if not safep:
-        return Fore.RED + "ABORTING: PRESSURE UNSAFE. PLEASE RESET SYSTEM ONCE MANUALLY CONFIRMED SAFE"
-    if not safel:
-        return Fore.RED + "ABORTING: LOAD UNSAFE. PLEASE RESET SYSTEM ONCE MANUALLY CONFIRMED SAFE"
+    for p, h in zip(presses, hists_p):
+        if not check_rate_of_change(h, p, max_pres_rate):
+            return False, "PRESSURE RATE OF CHANGE EXCEEDED"
+        if not check_sensor_avg(h, p, fault_pres_min, fault_pres_max):
+            return False, "PRESSURE OUT OF FAULT BOUNDS"
+        if not (warn_pres_min <= p <= warn_pres_max):
+            print(Fore.YELLOW + "WARNING: PRESSURE APPROACHING LIMITS")
 
-def wait_for_safe_conditions():
-    consecutive_safe = 0
-    while consecutive_safe < REQUIRED_SAFE:
-        temp = read_temperature(tpin_pos_num)
-        pres = read_pressure(ppin_num, res_val, pmin, pmax)
-        load = read_load(lpin_num, v_off, kload, v_kload)
+    if not check_rate_of_change(pastl, load, max_load_rate):
+        return False, "LOAD RATE OF CHANGE EXCEEDED"
+    if not check_sensor_avg(pastl, load, fault_load_min, fault_load_max):
+        return False, "LOAD OUT OF FAULT BOUNDS"
+    if not (warn_load_min <= load <= warn_load_max):
+        print(Fore.YELLOW + "WARNING: LOAD APPROACHING LIMITS")
 
-        safet = fault_temp_min <= temp <= fault_temp_max
-        safep = fault_pres_min <= pres <= fault_pres_max
-        safel = fault_load_min <= load <= fault_load_max
+    return True, ""
 
-        if safet and safep and safel:
-            consecutive_safe += 1
-        else:
-            consecutive_safe = 0
-        time.sleep(0.1)
+def update_history(tc1, tc2, pt1, pt2, pt3, pt4, load):
+    idx = timestamp % HIST
+    pastt1[idx] = tc1
+    pastt2[idx] = tc2
+    pastp1[idx] = pt1
+    pastp2[idx] = pt2
+    pastp3[idx] = pt3
+    pastp4[idx] = pt4
+    pastl[idx]  = load
 
-def wait_for_arm():
-    global killed, pastt, pastp, pastl
-    while not dread(arm_pin):
-        pass
-    pastt[:] = 0
-    pastp[:] = 0
-    pastl[:] = 0
-    dwrite(kill_pin_num, 1)
-    killed = False
-        
+# --------------------------------
+# ABORT PROTOCOL (global override)
+# V1-V5 CLOSED. Igniter OFF. V6 released (springs OPEN to dump Ox).
+# --------------------------------
+def abort(reason=""):
+    global system_state
+    move(v1_pin, "closed", v1_open_pwm, v1_close_pwm)
+    move(v2_pin, "closed", v2_open_pwm, v2_close_pwm)
+    move(v3_pin, "closed", v3_open_pwm, v3_close_pwm)
+    move(v4_pin, "closed", v4_open_pwm, v4_close_pwm)
+    move(v5_pin, "closed", v5_open_pwm, v5_close_pwm)
+    v6_release()
+    fire_off()
+    system_state = STATE_ABORT
+    print(Fore.RED + ("ABORT" + (f": {reason}" if reason else "")))
+    print(Fore.RED + "MANUAL RESET REQUIRED")
+
+def transition_to(new_state):
+    global system_state, state_timer
+    system_state = new_state
+    state_timer  = -1.0
+
+
+# ================================
+# FSM STATE HANDLERS
+# ================================
+
+# STATE 1: COLD OPS
+# All valves closed. V6 unpowered (open). Igniter off.
+# Polls until all PTs ~0 and TCs ~ambient. start_pin rising edge advances to STATE 2.
+def handle_cold_ops(tc1, tc2, pt1, pt2, pt3, pt4):
+    pts_at_zero = all(abs(p) <= pdiff for p in [pt1, pt2, pt3, pt4])
+    tcs_at_amb  = all(amb - tdiff <= t <= amb + tdiff for t in [tc1, tc2])
+    if pts_at_zero and tcs_at_amb:
+        if dread(start_pin) == 1:
+            transition_to(STATE_PRE_FIRE_PURGE)
+            print(Fore.CYAN + "STATE 2: PRE-FIRE PURGE")
+    else:
+        if not pts_at_zero:
+            print(Fore.YELLOW + "COLD OPS: PTs NOT AT ZERO — WAITING")
+        if not tcs_at_amb:
+            print(Fore.YELLOW + "COLD OPS: TCs NOT AT AMBIENT — WAITING")
+
+# STATE 2: PRE-FIRE PURGE
+# V4 & V5 open. V1, V2, V3 closed. V6 unpowered (open). Igniter off.
+# Runs for Purge_Time seconds, monitoring for anomalous back-pressure.
+def handle_pre_fire_purge(pt1, pt2, pt3, pt4):
+    global state_timer
+    if state_timer < 0:
+        move(v4_pin, "open", v4_open_pwm, v4_close_pwm)
+        move(v5_pin, "open", v5_open_pwm, v5_close_pwm)
+        state_timer = time.time()
+        return
+    for p in [pt1, pt2, pt3, pt4]:
+        if p > warn_pres_max:
+            abort("ANOMALOUS BACK-PRESSURE DURING PRE-FIRE PURGE")
+            return
+    if time.time() - state_timer >= Purge_Time:
+        move(v4_pin, "closed", v4_open_pwm, v4_close_pwm)
+        move(v5_pin, "closed", v5_open_pwm, v5_close_pwm)
+        transition_to(STATE_FILL)
+        print(Fore.CYAN + "STATE 3: FILL")
+
+# STATE 3: FILL
+# V6 powered closed FIRST, then V3 opens. V1, V2, V4, V5 closed.
+# Auto-closes V3 when Ox tank PT (pt2) hits MEOP.
+def handle_fill(pt2):
+    global state_timer
+    if state_timer < 0:
+        v6_power_closed()
+        move(v3_pin, "open", v3_open_pwm, v3_close_pwm)
+        state_timer = time.time()
+        return
+    if pt2 >= MEOP:
+        move(v3_pin, "closed", v3_open_pwm, v3_close_pwm)
+        transition_to(STATE_STATE_CHECK)
+        print(Fore.CYAN + "STATE 4: STATE CHECK — OX TANK AT MEOP")
+
+# STATE 4: STATE CHECK (terminal count)
+# V6 powered closed. All other valves closed. Igniter off.
+# Verifies all sensors within GO range. Enables fire prompt on confirmation.
+# Human gate: arm_pin rising edge authorizes hot fire.
+def handle_state_check(tc1, tc2, pt1, pt2, pt3, pt4):
+    global fire_authorized
+    softsafe = (
+        all(fault_temp_min <= t <= fault_temp_max for t in [tc1, tc2]) and
+        all(fault_pres_min <= p <= fault_pres_max for p in [pt1, pt2, pt3, pt4])
+    )
+    if not softsafe:
+        print(Fore.RED + "STATE CHECK: SENSORS NOT IN GO RANGE — HOLD")
+        return
+    if not fire_authorized:
+        print(Fore.GREEN + "ALL SENSORS GO — AWAITING FIRE AUTHORIZATION (arm_pin)")
+        fire_authorized = (dread(arm_pin) == 1)
+    if fire_authorized:
+        transition_to(STATE_HOT_FIRE)
+        print(Fore.YELLOW + "STATE 5: HOT FIRE SEQUENCE INITIATED")
+
+# STATE 5: HOT FIRE
+# Fully automated timed sequence. V6 stays powered closed.
+# V3, V4, V5 remain closed throughout.
+# Chamber PT (pt3) monitored at max rate:
+#   - Hard start: pt3 > Max_Chamber_Pressure → ABORT
+#   - Ignition failure: pt3 flat after V2 open → ABORT
+def handle_hot_fire(pt3):
+    global hot_fire_step, state_timer
+    if hot_fire_step == 0:
+        fire_on()
+        state_timer   = time.time()
+        hot_fire_step = 1
+    elif hot_fire_step == 1:
+        if pt3 > Max_Chamber_Pressure:
+            abort("HARD START — CHAMBER PRESSURE EXCEEDED LIMIT")
+            hot_fire_step = 0
+            return
+        if time.time() - state_timer >= Delay_1:
+            move(v1_pin, "open", v1_open_pwm, v1_close_pwm)
+            state_timer   = time.time()
+            hot_fire_step = 2
+    elif hot_fire_step == 2:
+        if pt3 > Max_Chamber_Pressure:
+            abort("HARD START — CHAMBER PRESSURE EXCEEDED LIMIT")
+            hot_fire_step = 0
+            return
+        if time.time() - state_timer >= Delay_2:
+            move(v2_pin, "open", v2_open_pwm, v2_close_pwm)
+            state_timer   = time.time()
+            hot_fire_step = 3
+    elif hot_fire_step == 3:
+        if pt3 > Max_Chamber_Pressure:
+            abort("HARD START — CHAMBER PRESSURE EXCEEDED LIMIT")
+            hot_fire_step = 0
+            return
+        elapsed = time.time() - state_timer
+        if elapsed >= Ignition_Confirm_Time and pt3 < Min_Ignition_Pressure:
+            abort("IGNITION FAILURE — NO CHAMBER PRESSURE AFTER VALVE OPEN")
+            hot_fire_step = 0
+            return
+        if elapsed >= Burn_Duration:
+            move(v1_pin, "closed", v1_open_pwm, v1_close_pwm)
+            move(v2_pin, "closed", v2_open_pwm, v2_close_pwm)
+            fire_off()
+            hot_fire_step = 0
+            transition_to(STATE_POST_FIRE_PURGE)
+            print(Fore.CYAN + "STATE 6: POST-FIRE PURGE")
+
+# STATE 6: POST-FIRE PURGE
+# V6 stays powered closed. V4 & V5 open. V1, V2, V3 closed.
+# Waits until chamber PT (pt3) drops to ~0 before advancing.
+def handle_post_fire_purge(pt3):
+    global state_timer
+    if state_timer < 0:
+        move(v4_pin, "open", v4_open_pwm, v4_close_pwm)
+        move(v5_pin, "open", v5_open_pwm, v5_close_pwm)
+        state_timer = time.time()
+        return
+    if abs(pt3) <= pdiff:
+        move(v4_pin, "closed", v4_open_pwm, v4_close_pwm)
+        move(v5_pin, "closed", v5_open_pwm, v5_close_pwm)
+        transition_to(STATE_VENT_SAFING)
+        print(Fore.CYAN + "STATE 7: VENT & SAFING")
+
+# STATE 7: VENT & SAFING
+# Drop V6 power — spring swings OPEN to vent Ox tank. All other valves closed.
+# Displays PAD SAFE only when all PTs read ~0 and TCs return to ambient.
+def handle_vent_safing(tc1, tc2, pt1, pt2, pt3, pt4):
+    global state_timer
+    if state_timer < 0:
+        v6_release()
+        state_timer = time.time()
+        return
+    pts_safe = all(abs(p) <= pdiff for p in [pt1, pt2, pt3, pt4])
+    tcs_safe = all(amb - tdiff <= t <= amb + tdiff for t in [tc1, tc2])
+    if pts_safe and tcs_safe:
+        print(Fore.GREEN + "PAD SAFE")
+
+
 # ================================
 # CONFIGURATION
 # ================================
-
-# Configure Temperature Sensing
-configure_thermocouple(tpin_pos_num, tpin_neg_num, trng, trind, tset, celsius)
-# Configure Pressure Sensing
-configure_transducer_loadcell(ppin_num, prng, prind)
-# Configure Load Sensing
-configure_transducer_loadcell(lpin_num, lrng, lrind)
-# Configure the Servo Pins
+configure_thermocouple(tc1_pin_pos, tc1_pin_neg, tc_rng, tc_rind, tc_sett, CELSIUS)
+configure_thermocouple(tc2_pin_pos, tc2_pin_neg, tc_rng, tc_rind, tc_sett, CELSIUS)
+configure_transducer_loadcell(pt1_pin, pt_rng, pt_rind)
+configure_transducer_loadcell(pt2_pin, pt_rng, pt_rind)
+configure_transducer_loadcell(pt3_pin, pt_rng, pt_rind)
+configure_transducer_loadcell(pt4_pin, pt_rng, pt_rind)
+configure_transducer_loadcell(lc_pin, lc_rng, lc_rind)
 configure_clock(pwm_freq)
-configure_digital_io(servo1_pwm_pin, "output")
-configure_pwm(servo1_pwm_pin, startval)
-configure_digital_io(servo2_pwm_pin, "output")
-configure_pwm(servo2_pwm_pin, startval)
-configure_digital_io(movact_pin_num, "input")
-# Configure ignition pins
-configure_digital_io(fire_pin, "input")
-configure_digital_io(ignite_out_pin, "output")
+for pin in [v1_pin, v2_pin, v3_pin, v4_pin, v5_pin, v6_pin]:
+    configure_digital_io(pin, "output")
+    configure_pwm(pin, startval)
+configure_digital_io(ignite_pin, "output")
+configure_digital_io(arm_pin,    "input")
+configure_digital_io(start_pin,  "input")
+
 
 # ================================
-# MAIN LOOP 
+# MAIN LOOP
 # ================================
-
 while True:
-    temp = read_temperature(tpin_pos_num)
-    pres = read_pressure(ppin_num, res_val, pmin, pmax)
-    load = read_load(lpin_num, v_off, kload, v_kload)
+    tc1  = read_temperature(tc1_pin_pos)
+    tc2  = read_temperature(tc2_pin_pos)
+    pt1  = read_pressure(pt1_pin, pt_res_val, pt1_pmin, pt1_pmax)
+    pt2  = read_pressure(pt2_pin, pt_res_val, pt2_pmin, pt2_pmax)
+    pt3  = read_pressure(pt3_pin, pt_res_val, pt3_pmin, pt3_pmax)
+    pt4  = read_pressure(pt4_pin, pt_res_val, pt4_pmin, pt4_pmax)
+    load = read_load(lc_pin, v_off, kload, v_kload)
 
-    # Rate-of-change fault check
-    safe_temp_rate = check_rate_of_change(pastt, temp, max_temp_rate)
-    safe_pres_rate = check_rate_of_change(pastp, pres, max_pres_rate)
-    safe_load_rate = check_rate_of_change(pastl, load, max_load_rate)
+    # Global safety — runs every tick except in ABORT/VENT_SAFING where we wait for manual reset
+    if system_state not in (STATE_ABORT, STATE_VENT_SAFING):
+        safe, fault_reason = run_safety_checks(tc1, tc2, pt1, pt2, pt3, pt4, load)
+        if not safe:
+            abort(fault_reason)
 
-    # Two-tier threshold checks
-    in_fault_temp = not (fault_temp_min <= temp <= fault_temp_max)
-    in_fault_pres = not (fault_pres_min <= pres <= fault_pres_max)
-    in_fault_load = not (fault_load_min <= load <= fault_load_max)
-    in_warn_temp  = not (warn_temp_min  <= temp <= warn_temp_max)
-    in_warn_pres  = not (warn_pres_min  <= pres <= warn_pres_max)
-    in_warn_load  = not (warn_load_min  <= load <= warn_load_max)
+    update_history(tc1, tc2, pt1, pt2, pt3, pt4, load)
 
-    safet = not in_fault_temp and safe_temp_rate and check_temperature(pastt, temp)
-    safep = not in_fault_pres and safe_pres_rate and check_pressure(pastp, pres)
-    safel = not in_fault_load and safe_load_rate and check_load(pastl, load)
+    if system_state == STATE_COLD_OPS:
+        handle_cold_ops(tc1, tc2, pt1, pt2, pt3, pt4)
+    elif system_state == STATE_PRE_FIRE_PURGE:
+        handle_pre_fire_purge(pt1, pt2, pt3, pt4)
+    elif system_state == STATE_FILL:
+        handle_fill(pt2)
+    elif system_state == STATE_STATE_CHECK:
+        handle_state_check(tc1, tc2, pt1, pt2, pt3, pt4)
+    elif system_state == STATE_HOT_FIRE:
+        handle_hot_fire(pt3)
+    elif system_state == STATE_POST_FIRE_PURGE:
+        handle_post_fire_purge(pt3)
+    elif system_state == STATE_VENT_SAFING:
+        handle_vent_safing(tc1, tc2, pt1, pt2, pt3, pt4)
+    elif system_state == STATE_ABORT:
+        pass  # Waiting for manual reset and restart
 
-    if not (safet and safep and safel):
-        kill_message = kill(safet, safep, safel, kill_pin_num)
-        killed = True
-        print(kill_message)
-        wait_for_safe_conditions()
-        print(Fore.GREEN + "SYSTEM SAFE: ARM TO RESTART")
-        wait_for_arm()
-    elif in_warn_temp or in_warn_pres or in_warn_load:
-        print(Fore.YELLOW + "WARNING: APPROACHING SAFETY LIMITS")
+    print(Fore.GREEN + f"TC1: {tc1:.1f}C  TC2: {tc2:.1f}C")
+    print(Fore.GREEN + f"PT1: {pt1:.1f}  PT2: {pt2:.1f}  PT3: {pt3:.1f}  PT4: {pt4:.1f} psi")
+    print(Fore.GREEN + f"Load: {load:.2f}  State: {system_state}")
 
-    if not killed:
-        idx = timestamp%hist
-        pastt[idx] = temp
-        pastp[idx] = pres
-        pastl[idx] = load
-        armed = (dread(arm_pin) == 1)
-        firing = (dread(fire_pin) == 1)
-
-        if firing:
-            if timestamp >= hist:
-                did_fire = fire_control(ignite_out_pin, fire_time, armed, pres, temp, load, fault_pres_max, fault_temp_max, fault_load_max, fault_pres_min, fault_temp_min, fault_load_min)
-                lastfire = int(did_fire)
-            else:
-                print(Fore.RED + "IGNITION FAILED: SYSTEM NOT READY")
-                lastfire = 0
-        
-        movcom = detect_move(movact_pin_num)
-        if movcom and servo_state == SERVO_IDLE:
-            moveseq_start(servo1_pwm_pin, servo2_pwm_pin)
-            moveseq_update(servo1_pwm_pin, servo2_pwm_pin)
-
-        print(Fore.GREEN + "Temperature (C):", temp)
-        print(Fore.GREEN + "Pressure (psi):", pres)
-        print(Fore.GREEN + "Force:", load)
-
-        timestamp += 1
-        time.sleep(0.1)
+    timestamp += 1
+    time.sleep(0.001)
