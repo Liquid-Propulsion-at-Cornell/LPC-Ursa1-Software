@@ -1,11 +1,14 @@
 # LPC LABJACK T7 PYTHON CONFIG SCRIPT
 # Author: Thomas Tedeschi
-# Last Update Date: 4/19/2026
+# Last Update Date: 4/25/2026
 
-from labjack import ljm
-from colorama import Fore, Style, init
+import threading
+import copy
 import time
 import numpy as np
+from dataclasses import dataclass
+from labjack import ljm
+from colorama import Fore, Style, init
 
 mb = ljm.openS("T7", "ANY", "ANY")
 
@@ -111,33 +114,48 @@ FAHRENHEIT = 2
 # tdiff =            # allowable TC deviation from ambient (C)
 # pdiff =            # allowable PT deviation from 0 psig
 
-REQUIRED_SAFE = 5
-HIST          = 10
+HIST           = 10
+REQUIRED_SAFE  = 5
+SAMPLE_PERIOD  = 0.001   # 1 kHz
+CONTROL_PERIOD = 0.001   # 1 kHz
+
 
 # ================================
-# RUNTIME STATE
+# SENSOR SNAPSHOT
+# Scalar-only; history arrays live inside sampling_loop.
+# ================================
+@dataclass
+class SensorSnapshot:
+    tc1:       float = 0.0
+    tc2:       float = 0.0
+    pt1:       float = 0.0
+    pt2:       float = 0.0
+    pt3:       float = 0.0
+    pt4:       float = 0.0
+    load:      float = 0.0
+    timestamp: int   = 0
+
+
+# ================================
+# RUNTIME FSM STATE
+# Owned exclusively by control_loop; sampling_loop reads system_state under state_lock.
 # ================================
 system_state    = STATE_COLD_OPS
-state_timer     = -1.0   # -1.0 = not yet entered current state
-hot_fire_step   = 0      # sub-step within STATE_HOT_FIRE (0–3)
+state_timer     = -1.0
+hot_fire_step   = 0
 ignite          = False
 fire_authorized = False
-timestamp       = 0
-
-pastt1 = np.zeros(HIST)
-pastt2 = np.zeros(HIST)
-pastp1 = np.zeros(HIST)
-pastp2 = np.zeros(HIST)
-pastp3 = np.zeros(HIST)
-pastp4 = np.zeros(HIST)
-pastl  = np.zeros(HIST)
 
 
 # ================================
-# EXCEPTIONS
+# THREAD SYNCHRONIZATION
 # ================================
-class SystemFault(Exception):
-    pass
+sensor_lock  = threading.Lock()   # guards latest_sensors reads/writes
+state_lock   = threading.Lock()   # guards system_state reads/writes
+abort_event  = threading.Event()  # set by either thread on fault or interrupt
+abort_reason = ""                 # written under state_lock before setting event
+
+latest_sensors = SensorSnapshot()
 
 
 # ================================
@@ -218,7 +236,6 @@ def v6_power_closed():
     ljm.eWriteName(mb, f"DIO{v6_pin}_EF_CONFIG_A", v6_close_pwm)
 
 def v6_release():
-    # Drop PWM — spring returns V6 to open (vent/dump)
     ljm.eWriteName(mb, f"DIO{v6_pin}_EF_ENABLE", 0)
 
 def dread(diopin_num):
@@ -247,66 +264,75 @@ def fire_off():
 
 # ================================
 # SAFETY FUNCTIONS
+# History arrays are local to sampling_loop and passed in explicitly.
 # ================================
 
-def check_rate_of_change(history, current, max_delta):
-    if timestamp == 0:
+def check_rate_of_change(history, current, max_delta, ts):
+    if ts == 0:
         return True
-    last = history[(timestamp - 1) % HIST]
+    last = history[(ts - 1) % HIST]
     return abs(current - last) <= max_delta
 
-def check_sensor_avg(history, current, lo, hi):
-    count = min(timestamp, HIST)
+def check_sensor_avg(history, current, lo, hi, ts):
+    count = min(ts, HIST)
     avg = (np.sum(history[:count]) + current) / (count + 1)
     return lo <= avg <= hi
 
-def run_safety_checks(tc1, tc2, pt1, pt2, pt3, pt4, load):
-    temps   = [tc1, tc2]
-    presses = [pt1, pt2, pt3, pt4]
-    hists_t = [pastt1, pastt2]
-    hists_p = [pastp1, pastp2, pastp3, pastp4]
+def run_safety_checks(snap, pastt1, pastt2, pastp1, pastp2, pastp3, pastp4, pastl, cur_state):
+    ts = snap.timestamp
 
-    if system_state != STATE_HOT_FIRE
-    for t, h in zip(temps, hists_t):
-        if not check_rate_of_change(h, t, max_temp_rate):
-            return False, "TEMPERATURE RATE OF CHANGE EXCEEDED"
-        if not check_sensor_avg(h, t, fault_temp_min, fault_temp_max):
-            return False, "TEMPERATURE OUT OF FAULT BOUNDS"
-        if not (warn_temp_min <= t <= warn_temp_max):
-            print(Fore.YELLOW + "WARNING: TEMPERATURE APPROACHING LIMITS")
+    if cur_state != STATE_HOT_FIRE:
+        for t, h in zip([snap.tc1, snap.tc2], [pastt1, pastt2]):
+            if not check_rate_of_change(h, t, max_temp_rate, ts):
+                return False, "TEMPERATURE RATE OF CHANGE EXCEEDED"
+            if not check_sensor_avg(h, t, fault_temp_min, fault_temp_max, ts):
+                return False, "TEMPERATURE OUT OF FAULT BOUNDS"
+            if not (warn_temp_min <= t <= warn_temp_max):
+                print(Fore.YELLOW + "WARNING: TEMPERATURE APPROACHING LIMITS")
 
-    for p, h in zip(presses, hists_p):
-        if not check_rate_of_change(h, p, max_pres_rate):
-            return False, "PRESSURE RATE OF CHANGE EXCEEDED"
-        if not check_sensor_avg(h, p, fault_pres_min, fault_pres_max):
-            return False, "PRESSURE OUT OF FAULT BOUNDS"
-        if not (warn_pres_min <= p <= warn_pres_max):
-            print(Fore.YELLOW + "WARNING: PRESSURE APPROACHING LIMITS")
+        for p, h in zip([snap.pt1, snap.pt2, snap.pt3, snap.pt4],
+                        [pastp1,   pastp2,   pastp3,   pastp4]):
+            if not check_rate_of_change(h, p, max_pres_rate, ts):
+                return False, "PRESSURE RATE OF CHANGE EXCEEDED"
+            if not check_sensor_avg(h, p, fault_pres_min, fault_pres_max, ts):
+                return False, "PRESSURE OUT OF FAULT BOUNDS"
+            if not (warn_pres_min <= p <= warn_pres_max):
+                print(Fore.YELLOW + "WARNING: PRESSURE APPROACHING LIMITS")
 
-    if not check_rate_of_change(pastl, load, max_load_rate):
+    if not check_rate_of_change(pastl, snap.load, max_load_rate, ts):
         return False, "LOAD RATE OF CHANGE EXCEEDED"
-    if not check_sensor_avg(pastl, load, fault_load_min, fault_load_max):
+    if not check_sensor_avg(pastl, snap.load, fault_load_min, fault_load_max, ts):
         return False, "LOAD OUT OF FAULT BOUNDS"
-    if not (warn_load_min <= load <= warn_load_max):
+    if not (warn_load_min <= snap.load <= warn_load_max):
         print(Fore.YELLOW + "WARNING: LOAD APPROACHING LIMITS")
 
     return True, ""
 
-def update_history(tc1, tc2, pt1, pt2, pt3, pt4, load):
-    idx = timestamp % HIST
-    pastt1[idx] = tc1
-    pastt2[idx] = tc2
-    pastp1[idx] = pt1
-    pastp2[idx] = pt2
-    pastp3[idx] = pt3
-    pastp4[idx] = pt4
-    pastl[idx]  = load
+def update_history(snap, pastt1, pastt2, pastp1, pastp2, pastp3, pastp4, pastl):
+    idx = snap.timestamp % HIST
+    pastt1[idx] = snap.tc1
+    pastt2[idx] = snap.tc2
+    pastp1[idx] = snap.pt1
+    pastp2[idx] = snap.pt2
+    pastp3[idx] = snap.pt3
+    pastp4[idx] = snap.pt4
+    pastl[idx]  = snap.load
 
-# --------------------------------
-# ABORT PROTOCOL (global override)
-# V1-V5 CLOSED. Igniter OFF. V6 released (springs OPEN to dump Ox).
-# --------------------------------
+
+# ================================
+# ABORT
+# Non-blocking: sets reason + event. control_loop runs hardware shutdown on exit.
+# ================================
+
 def abort(reason=""):
+    global abort_reason
+    with state_lock:
+        abort_reason = reason
+    abort_event.set()
+    print(Fore.RED + ("ABORT" + (f": {reason}" if reason else "")))
+    print(Fore.RED + "MANUAL RESET REQUIRED")
+
+def _do_abort_hardware():
     global system_state
     move(v1_pin, "closed", v1_open_pwm, v1_close_pwm)
     move(v2_pin, "closed", v2_open_pwm, v2_close_pwm)
@@ -316,26 +342,26 @@ def abort(reason=""):
     v6_release()
     fire_off()
     dwrite(kill_pin, 0)
-    system_state = STATE_ABORT
-    print(Fore.RED + ("ABORT" + (f": {reason}" if reason else "")))
-    print(Fore.RED + "MANUAL RESET REQUIRED")
+    with state_lock:
+        system_state = STATE_ABORT
 
 def transition_to(new_state):
     global system_state, state_timer
-    system_state = new_state
-    state_timer  = -1.0
+    with state_lock:
+        system_state = new_state
+    state_timer = -1.0
 
 
 # ================================
 # FSM STATE HANDLERS
+# All read-only on snap. state_timer / hot_fire_step / fire_authorized are
+# private to control_loop — no lock needed for those.
 # ================================
 
 # STATE 1: COLD OPS
-# All valves closed. V6 unpowered (open). Igniter off.
-# Polls until all PTs ~0 and TCs ~ambient. start_pin rising edge advances to STATE 2.
-def handle_cold_ops(tc1, tc2, pt1, pt2, pt3, pt4):
-    pts_at_zero = all(abs(p) <= pdiff for p in [pt1, pt2, pt3, pt4])
-    tcs_at_amb  = all(amb - tdiff <= t <= amb + tdiff for t in [tc1, tc2])
+def handle_cold_ops(snap):
+    pts_at_zero = all(abs(p) <= pdiff for p in [snap.pt1, snap.pt2, snap.pt3, snap.pt4])
+    tcs_at_amb  = all(amb - tdiff <= t <= amb + tdiff for t in [snap.tc1, snap.tc2])
     if pts_at_zero and tcs_at_amb:
         if dread(start_pin) == 1:
             transition_to(STATE_PRE_FIRE_PURGE)
@@ -347,16 +373,14 @@ def handle_cold_ops(tc1, tc2, pt1, pt2, pt3, pt4):
             print(Fore.YELLOW + "COLD OPS: TCs NOT AT AMBIENT — WAITING")
 
 # STATE 2: PRE-FIRE PURGE
-# V4 & V5 open. V1, V2, V3 closed. V6 unpowered (open). Igniter off.
-# Runs for Purge_Time seconds, monitoring for anomalous back-pressure.
-def handle_pre_fire_purge(pt1, pt2, pt3, pt4):
+def handle_pre_fire_purge(snap):
     global state_timer
     if state_timer < 0:
         move(v4_pin, "open", v4_open_pwm, v4_close_pwm)
         move(v5_pin, "open", v5_open_pwm, v5_close_pwm)
         state_timer = time.time()
         return
-    for p in [pt1, pt2, pt3, pt4]:
+    for p in [snap.pt1, snap.pt2, snap.pt3, snap.pt4]:
         if p > warn_pres_max:
             abort("ANOMALOUS BACK-PRESSURE DURING PRE-FIRE PURGE")
             return
@@ -367,29 +391,24 @@ def handle_pre_fire_purge(pt1, pt2, pt3, pt4):
         print(Fore.CYAN + "STATE 3: FILL")
 
 # STATE 3: FILL
-# V6 powered closed FIRST, then V3 opens. V1, V2, V4, V5 closed.
-# Auto-closes V3 when Ox tank PT (pt2) hits MEOP.
-def handle_fill(pt2):
+def handle_fill(snap):
     global state_timer
     if state_timer < 0:
         v6_power_closed()
         move(v3_pin, "open", v3_open_pwm, v3_close_pwm)
         state_timer = time.time()
         return
-    if pt2 >= MEOP:
+    if snap.pt2 >= MEOP:
         move(v3_pin, "closed", v3_open_pwm, v3_close_pwm)
         transition_to(STATE_STATE_CHECK)
         print(Fore.CYAN + "STATE 4: STATE CHECK — OX TANK AT MEOP")
 
-# STATE 4: STATE CHECK (terminal count)
-# V6 powered closed. All other valves closed. Igniter off.
-# Verifies all sensors within GO range. Enables fire prompt on confirmation.
-# Human gate: arm_pin rising edge authorizes hot fire.
-def handle_state_check(tc1, tc2, pt1, pt2, pt3, pt4):
+# STATE 4: STATE CHECK
+def handle_state_check(snap):
     global fire_authorized
     softsafe = (
-        all(fault_temp_min <= t <= fault_temp_max for t in [tc1, tc2]) and
-        all(fault_pres_min <= p <= fault_pres_max for p in [pt1, pt2, pt3, pt4])
+        all(fault_temp_min <= t <= fault_temp_max for t in [snap.tc1, snap.tc2]) and
+        all(fault_pres_min <= p <= fault_pres_max for p in [snap.pt1, snap.pt2, snap.pt3, snap.pt4])
     )
     if not softsafe:
         print(Fore.RED + "STATE CHECK: SENSORS NOT IN GO RANGE — HOLD")
@@ -402,19 +421,14 @@ def handle_state_check(tc1, tc2, pt1, pt2, pt3, pt4):
         print(Fore.YELLOW + "STATE 5: HOT FIRE SEQUENCE INITIATED")
 
 # STATE 5: HOT FIRE
-# Fully automated timed sequence. V6 stays powered closed.
-# V3, V4, V5 remain closed throughout.
-# Chamber PT (pt3) monitored at max rate:
-#   - Hard start: pt3 > Max_Chamber_Pressure → ABORT
-#   - Ignition failure: pt3 flat after V2 open → ABORT
-def handle_hot_fire(pt3):
+def handle_hot_fire(snap):
     global hot_fire_step, state_timer
     if hot_fire_step == 0:
         fire_on()
         state_timer   = time.time()
         hot_fire_step = 1
     elif hot_fire_step == 1:
-        if pt3 > Max_Chamber_Pressure:
+        if snap.pt3 > Max_Chamber_Pressure:
             abort("HARD START — CHAMBER PRESSURE EXCEEDED LIMIT")
             hot_fire_step = 0
             return
@@ -423,7 +437,7 @@ def handle_hot_fire(pt3):
             state_timer   = time.time()
             hot_fire_step = 2
     elif hot_fire_step == 2:
-        if pt3 > Max_Chamber_Pressure:
+        if snap.pt3 > Max_Chamber_Pressure:
             abort("HARD START — CHAMBER PRESSURE EXCEEDED LIMIT")
             hot_fire_step = 0
             return
@@ -432,12 +446,12 @@ def handle_hot_fire(pt3):
             state_timer   = time.time()
             hot_fire_step = 3
     elif hot_fire_step == 3:
-        if pt3 > Max_Chamber_Pressure:
+        if snap.pt3 > Max_Chamber_Pressure:
             abort("HARD START — CHAMBER PRESSURE EXCEEDED LIMIT")
             hot_fire_step = 0
             return
         elapsed = time.time() - state_timer
-        if elapsed >= Ignition_Confirm_Time and pt3 < Min_Ignition_Pressure:
+        if elapsed >= Ignition_Confirm_Time and snap.pt3 < Min_Ignition_Pressure:
             abort("IGNITION FAILURE — NO CHAMBER PRESSURE AFTER VALVE OPEN")
             hot_fire_step = 0
             return
@@ -450,32 +464,28 @@ def handle_hot_fire(pt3):
             print(Fore.CYAN + "STATE 6: POST-FIRE PURGE")
 
 # STATE 6: POST-FIRE PURGE
-# V6 stays powered closed. V4 & V5 open. V1, V2, V3 closed.
-# Waits until chamber PT (pt3) drops to ~0 before advancing.
-def handle_post_fire_purge(pt3):
+def handle_post_fire_purge(snap):
     global state_timer
     if state_timer < 0:
         move(v4_pin, "open", v4_open_pwm, v4_close_pwm)
         move(v5_pin, "open", v5_open_pwm, v5_close_pwm)
         state_timer = time.time()
         return
-    if abs(pt3) <= pdiff:
+    if abs(snap.pt3) <= pdiff:
         move(v4_pin, "closed", v4_open_pwm, v4_close_pwm)
         move(v5_pin, "closed", v5_open_pwm, v5_close_pwm)
         transition_to(STATE_VENT_SAFING)
         print(Fore.CYAN + "STATE 7: VENT & SAFING")
 
 # STATE 7: VENT & SAFING
-# Drop V6 power — spring swings OPEN to vent Ox tank. All other valves closed.
-# Displays PAD SAFE only when all PTs read ~0 and TCs return to ambient.
-def handle_vent_safing(tc1, tc2, pt1, pt2, pt3, pt4):
+def handle_vent_safing(snap):
     global state_timer
     if state_timer < 0:
         v6_release()
         state_timer = time.time()
         return
-    pts_safe = all(abs(p) <= pdiff for p in [pt1, pt2, pt3, pt4])
-    tcs_safe = all(amb - tdiff <= t <= amb + tdiff for t in [tc1, tc2])
+    pts_safe = all(abs(p) <= pdiff for p in [snap.pt1, snap.pt2, snap.pt3, snap.pt4])
+    tcs_safe = all(amb - tdiff <= t <= amb + tdiff for t in [snap.tc1, snap.tc2])
     if pts_safe and tcs_safe:
         print(Fore.GREEN + "PAD SAFE")
 
@@ -502,45 +512,104 @@ configure_digital_io(start_pin,  "input")
 
 
 # ================================
-# MAIN LOOP
+# THREADS
 # ================================
-while True:
-    tc1  = read_temperature(tc1_pin_pos)
-    tc2  = read_temperature(tc2_pin_pos)
-    pt1  = read_pressure(pt1_pin, pt_res_val, pt1_pmin, pt1_pmax)
-    pt2  = read_pressure(pt2_pin, pt_res_val, pt2_pmin, pt2_pmax)
-    pt3  = read_pressure(pt3_pin, pt_res_val, pt3_pmin, pt3_pmax)
-    pt4  = read_pressure(pt4_pin, pt_res_val, pt4_pmin, pt4_pmax)
-    load = read_load(lc_pin, v_off, kload, v_kload)
 
-    # Global safety — runs every tick except in ABORT/VENT_SAFING where we wait for manual reset
-    if system_state not in (STATE_ABORT, STATE_VENT_SAFING):
-        safe, fault_reason = run_safety_checks(tc1, tc2, pt1, pt2, pt3, pt4, load)
-        if not safe:
-            abort(fault_reason)
+def sampling_loop():
+    pastt1 = np.zeros(HIST)
+    pastt2 = np.zeros(HIST)
+    pastp1 = np.zeros(HIST)
+    pastp2 = np.zeros(HIST)
+    pastp3 = np.zeros(HIST)
+    pastp4 = np.zeros(HIST)
+    pastl  = np.zeros(HIST)
+    ts = 0
 
-    update_history(tc1, tc2, pt1, pt2, pt3, pt4, load)
+    while not abort_event.is_set():
+        snap = SensorSnapshot(
+            tc1       = read_temperature(tc1_pin_pos),
+            tc2       = read_temperature(tc2_pin_pos),
+            pt1       = read_pressure(pt1_pin, pt_res_val, pt1_pmin, pt1_pmax),
+            pt2       = read_pressure(pt2_pin, pt_res_val, pt2_pmin, pt2_pmax),
+            pt3       = read_pressure(pt3_pin, pt_res_val, pt3_pmin, pt3_pmax),
+            pt4       = read_pressure(pt4_pin, pt_res_val, pt4_pmin, pt4_pmax),
+            load      = read_load(lc_pin, v_off, kload, v_kload),
+            timestamp = ts,
+        )
 
-    if system_state == STATE_COLD_OPS:
-        handle_cold_ops(tc1, tc2, pt1, pt2, pt3, pt4)
-    elif system_state == STATE_PRE_FIRE_PURGE:
-        handle_pre_fire_purge(pt1, pt2, pt3, pt4)
-    elif system_state == STATE_FILL:
-        handle_fill(pt2)
-    elif system_state == STATE_STATE_CHECK:
-        handle_state_check(tc1, tc2, pt1, pt2, pt3, pt4)
-    elif system_state == STATE_HOT_FIRE:
-        handle_hot_fire(pt3)
-    elif system_state == STATE_POST_FIRE_PURGE:
-        handle_post_fire_purge(pt3)
-    elif system_state == STATE_VENT_SAFING:
-        handle_vent_safing(tc1, tc2, pt1, pt2, pt3, pt4)
-    elif system_state == STATE_ABORT:
-        pass  # Waiting for manual reset and restart
+        with state_lock:
+            cur_state = system_state
 
-    print(Fore.GREEN + f"TC1: {tc1:.1f}C  TC2: {tc2:.1f}C")
-    print(Fore.GREEN + f"PT1: {pt1:.1f}  PT2: {pt2:.1f}  PT3: {pt3:.1f}  PT4: {pt4:.1f} psi")
-    print(Fore.GREEN + f"Load: {load:.2f}  State: {system_state}")
+        if cur_state not in (STATE_ABORT, STATE_VENT_SAFING):
+            safe, reason = run_safety_checks(
+                snap, pastt1, pastt2, pastp1, pastp2, pastp3, pastp4, pastl, cur_state
+            )
+            if not safe:
+                abort(reason)
 
-    timestamp += 1
-    time.sleep(0.001)
+        update_history(snap, pastt1, pastt2, pastp1, pastp2, pastp3, pastp4, pastl)
+
+        with sensor_lock:
+            latest_sensors.tc1       = snap.tc1
+            latest_sensors.tc2       = snap.tc2
+            latest_sensors.pt1       = snap.pt1
+            latest_sensors.pt2       = snap.pt2
+            latest_sensors.pt3       = snap.pt3
+            latest_sensors.pt4       = snap.pt4
+            latest_sensors.load      = snap.load
+            latest_sensors.timestamp = ts
+
+        print(Fore.GREEN + f"TC1: {snap.tc1:.1f}C  TC2: {snap.tc2:.1f}C")
+        print(Fore.GREEN + f"PT1: {snap.pt1:.1f}  PT2: {snap.pt2:.1f}  PT3: {snap.pt3:.1f}  PT4: {snap.pt4:.1f} psi")
+        print(Fore.GREEN + f"Load: {snap.load:.2f}  State: {cur_state}")
+
+        ts += 1
+        time.sleep(SAMPLE_PERIOD)
+
+
+def control_loop():
+    while not abort_event.is_set():
+        with sensor_lock:
+            snap = copy.copy(latest_sensors)
+
+        with state_lock:
+            cur_state = system_state
+
+        if cur_state == STATE_COLD_OPS:
+            handle_cold_ops(snap)
+        elif cur_state == STATE_PRE_FIRE_PURGE:
+            handle_pre_fire_purge(snap)
+        elif cur_state == STATE_FILL:
+            handle_fill(snap)
+        elif cur_state == STATE_STATE_CHECK:
+            handle_state_check(snap)
+        elif cur_state == STATE_HOT_FIRE:
+            handle_hot_fire(snap)
+        elif cur_state == STATE_POST_FIRE_PURGE:
+            handle_post_fire_purge(snap)
+        elif cur_state == STATE_VENT_SAFING:
+            handle_vent_safing(snap)
+
+        time.sleep(CONTROL_PERIOD)
+
+    _do_abort_hardware()
+
+
+# ================================
+# ENTRY POINT
+# ================================
+if __name__ == "__main__":
+    sampler    = threading.Thread(target=sampling_loop, daemon=True, name="sampling")
+    controller = threading.Thread(target=control_loop,  daemon=True, name="control")
+    sampler.start()
+    controller.start()
+    try:
+        while not abort_event.is_set():
+            abort_event.wait(timeout=0.1)
+    except KeyboardInterrupt:
+        abort("KEYBOARD INTERRUPT")
+    finally:
+        abort_event.set()
+        sampler.join(timeout=2.0)
+        controller.join(timeout=2.0)
+        ljm.close(mb)

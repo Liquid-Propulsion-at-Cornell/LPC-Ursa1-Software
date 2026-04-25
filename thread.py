@@ -20,8 +20,6 @@ daqsampling.v6_release = daqservos.v6_release
 daqsampling.fire_off   = daqservos.fire_off
 daqsampling.dwrite     = daqservos.dwrite
 
-# Wire daqservos's hot-fire pressure read to daqsampling's measurement functions
-daqservos.read_pressure = daqsampling.read_pressure
 
 HIST = daqsampling.HIST
 
@@ -81,7 +79,7 @@ def sample_thread():
             snapshot.pt4  = pt4
             snapshot.load = load
 
-        time.sleep(0.01)   # 100 Hz sampling rate
+        time.sleep(0.001)  # 1 kHz sampling rate
 
 
 def servo_thread():
@@ -104,7 +102,7 @@ def servo_thread():
         elif state == daqservos.STATE_STATE_CHECK:
             daqservos.handle_state_check(tc1, tc2, pt1, pt2, pt3, pt4)
         elif state == daqservos.STATE_HOT_FIRE:
-            daqservos.handle_hot_fire()                # blocks for full sequence
+            daqservos.handle_hot_fire(pt3)                   # blocks on first entry for delays
         elif state == daqservos.STATE_POST_FIRE_PURGE:
             daqservos.handle_post_fire_purge(pt3)
         elif state == daqservos.STATE_VENT_SAFING:

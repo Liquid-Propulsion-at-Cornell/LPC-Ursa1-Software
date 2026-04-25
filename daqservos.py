@@ -273,30 +273,33 @@ def handle_state_check(tc1, tc2, pt1, pt2, pt3, pt4):
 # Chamber PT (pt3) monitored during burn:
 #   - Hard start: pt3 > Max_Chamber_Pressure → ABORT
 #   - Ignition failure: pt3 flat after V2 open → ABORT
-def handle_hot_fire():
-    fire_on()
-    time.sleep(Delay_1)
-    move(v1_pin, "open", v1_open_pwm, v1_close_pwm)
-    time.sleep(Delay_2)
-    move(v2_pin, "open", v2_open_pwm, v2_close_pwm)
-    t_v2 = time.time()
-    while True:
-        pt3     = read_pressure(pt3_pin, pt_res_val, pt3_pmin, pt3_pmax)
-        elapsed = time.time() - t_v2
+def handle_hot_fire(pt3):
+    global hot_fire_step, state_timer
+    if hot_fire_step == 0:
+        fire_on()
+        time.sleep(Delay_1)
+        move(v1_pin, "open", v1_open_pwm, v1_close_pwm)
+        time.sleep(Delay_2)
+        move(v2_pin, "open", v2_open_pwm, v2_close_pwm)
+        state_timer   = time.time()
+        hot_fire_step = 1
+    elif hot_fire_step == 1:
         if pt3 > Max_Chamber_Pressure:
             abort("HARD START — CHAMBER PRESSURE EXCEEDED LIMIT")
+            hot_fire_step = 0
             return
+        elapsed = time.time() - state_timer
         if elapsed >= Ignition_Confirm_Time and pt3 < Min_Ignition_Pressure:
             abort("IGNITION FAILURE — NO CHAMBER PRESSURE AFTER VALVE OPEN")
+            hot_fire_step = 0
             return
         if elapsed >= Burn_Duration:
-            break
-        time.sleep(0.001)
-    move(v1_pin, "closed", v1_open_pwm, v1_close_pwm)
-    move(v2_pin, "closed", v2_open_pwm, v2_close_pwm)
-    fire_off()
-    transition_to(STATE_POST_FIRE_PURGE)
-    print(Fore.CYAN + "STATE 6: POST-FIRE PURGE")
+            move(v1_pin, "closed", v1_open_pwm, v1_close_pwm)
+            move(v2_pin, "closed", v2_open_pwm, v2_close_pwm)
+            fire_off()
+            hot_fire_step = 0
+            transition_to(STATE_POST_FIRE_PURGE)
+            print(Fore.CYAN + "STATE 6: POST-FIRE PURGE")
 
 # STATE 6: POST-FIRE PURGE
 # V6 stays powered closed. V4 & V5 open. V1, V2, V3 closed.
@@ -350,46 +353,3 @@ configure_digital_io(arm_pin,    "input")
 configure_digital_io(start_pin,  "input")
 
 
-# ================================
-# MAIN LOOP (standalone only)
-# ================================
-if __name__ == "__main__":
-    while True:
-        tc1  = read_temperature(tc1_pin_pos)
-        tc2  = read_temperature(tc2_pin_pos)
-        pt1  = read_pressure(pt1_pin, pt_res_val, pt1_pmin, pt1_pmax)
-        pt2  = read_pressure(pt2_pin, pt_res_val, pt2_pmin, pt2_pmax)
-        pt3  = read_pressure(pt3_pin, pt_res_val, pt3_pmin, pt3_pmax)
-        pt4  = read_pressure(pt4_pin, pt_res_val, pt4_pmin, pt4_pmax)
-        load = read_load(lc_pin, v_off, kload, v_kload)
-
-        if system_state not in (STATE_ABORT, STATE_VENT_SAFING):
-            safe, fault_reason = run_safety_checks(tc1, tc2, pt1, pt2, pt3, pt4, load)
-            if not safe:
-                abort(fault_reason)
-
-        update_history(tc1, tc2, pt1, pt2, pt3, pt4, load)
-
-        if system_state == STATE_COLD_OPS:
-            handle_cold_ops(tc1, tc2, pt1, pt2, pt3, pt4)
-        elif system_state == STATE_PRE_FIRE_PURGE:
-            handle_pre_fire_purge()
-        elif system_state == STATE_FILL:
-            handle_fill(pt2)
-        elif system_state == STATE_STATE_CHECK:
-            handle_state_check(tc1, tc2, pt1, pt2, pt3, pt4)
-        elif system_state == STATE_HOT_FIRE:
-            handle_hot_fire()
-        elif system_state == STATE_POST_FIRE_PURGE:
-            handle_post_fire_purge(pt3)
-        elif system_state == STATE_VENT_SAFING:
-            handle_vent_safing(tc1, tc2, pt1, pt2, pt3, pt4)
-        elif system_state == STATE_ABORT:
-            pass  # Waiting for manual reset and restart
-
-        print(Fore.GREEN + f"TC1: {tc1:.1f}C  TC2: {tc2:.1f}C")
-        print(Fore.GREEN + f"PT1: {pt1:.1f}  PT2: {pt2:.1f}  PT3: {pt3:.1f}  PT4: {pt4:.1f} psi")
-        print(Fore.GREEN + f"Load: {load:.2f}  State: {system_state}")
-
-        timestamp += 1
-        time.sleep(0.001)
