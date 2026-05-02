@@ -14,6 +14,8 @@ The control and DAQ script for the Ursa 1 engine is located in the file ursa1-da
 
 Due to the safety considerations involved in this project, you **must** have explicit permission from the owners to edit this repository. Any person who edits this repository without permission will be permanently banned from accessing it, and their edits will be immediately removed. If you wish to edit it, any copying and editing outside of the repository is approved by the owners. Please use this software responsibly.  
 
+## Contact/Feedback
+
 All code is owned, written, and maintained by Thomas Tedeschi (tmt115) as of 2026. Any questions or suggestions can be sent through github issues, or sent to tmt65@cornell.edu.  
 
 
