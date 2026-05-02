@@ -1,4 +1,4 @@
-# Liquid Propulsion at Cornell Software Hub
+# Liquid Propulsion at Cornell Ursa 1 Software Hub
 
 This repository contains the software for the data acquisition (DAQ) and control systems used by Liquid Propulsion at Cornell (LPC). It contains python scripts for both engine control and DAQ, as well as testing files for different software and hardware. Feel free to use or adapt this software for your own purposes.
 
