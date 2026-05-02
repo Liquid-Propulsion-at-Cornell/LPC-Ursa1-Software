@@ -1,3 +1,7 @@
+# THERMOCOUPLE READ TEST
+# Author: Thomas Tedeschi
+# Last Update Date: 5/2/2026
+
 from labjack import ljm
 from colorama import Fore, init
 import time

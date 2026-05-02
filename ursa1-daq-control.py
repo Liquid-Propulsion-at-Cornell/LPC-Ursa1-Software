@@ -1,4 +1,4 @@
-# LPC LABJACK T7 PYTHON CONFIG SCRIPT
+# LPC URSA 1 DAQ/CONTROL SCRIPT
 # Author: Thomas Tedeschi
 # Last Update Date: 5/2/2026
 
