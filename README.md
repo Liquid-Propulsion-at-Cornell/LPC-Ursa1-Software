@@ -4,8 +4,6 @@ This repository contains the software for the data acquisition (DAQ) and control
 
 ## Software Log
 
-### Ursa 1
-
 The control and DAQ script for the Ursa 1 engine is located in the file ursa1-daq-control.py. This engine's systems are centered around the LabJack T7 board, so the script is configured around it. The script uses a threaded infrastructure, splitting between reading the sensors and running safety checks, and controling the servo motors according to our FSM.  
 
 **This script is still under construction, and is not completely finished. Make sure to edit if you wish to use it.**
