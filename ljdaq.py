@@ -1,6 +1,6 @@
 # LPC LABJACK T7 PYTHON CONFIG SCRIPT
 # Author: Thomas Tedeschi
-# Last Update Date: 4/25/2026
+# Last Update Date: 5/2/2026
 
 import threading
 import copy
@@ -126,34 +126,33 @@ CONTROL_PERIOD = 0.001   # 1 kHz
 # ================================
 @dataclass
 class SensorSnapshot:
-    tc1:       float = 0.0
-    tc2:       float = 0.0
-    pt1:       float = 0.0
-    pt2:       float = 0.0
-    pt3:       float = 0.0
-    pt4:       float = 0.0
-    load:      float = 0.0
-    timestamp: int   = 0
+    tc1: float = 0.0
+    tc2: float = 0.0
+    pt1: float = 0.0
+    pt2: float = 0.0
+    pt3: float = 0.0
+    pt4: float = 0.0
+    load: float = 0.0
+    timestamp:vint = 0
 
 
 # ================================
 # RUNTIME FSM STATE
-# Owned exclusively by control_loop; sampling_loop reads system_state under state_lock.
 # ================================
-system_state    = STATE_COLD_OPS
-state_timer     = -1.0
-hot_fire_step   = 0
-ignite          = False
+system_state = STATE_COLD_OPS
+state_timer = -1.0
+hot_fire_step = 0
+ignite = False
 fire_authorized = False
 
 
 # ================================
 # THREAD SYNCHRONIZATION
 # ================================
-sensor_lock  = threading.Lock()   # guards latest_sensors reads/writes
-state_lock   = threading.Lock()   # guards system_state reads/writes
-abort_event  = threading.Event()  # set by either thread on fault or interrupt
-abort_reason = ""                 # written under state_lock before setting event
+sensor_lock = threading.Lock()   
+state_lock = threading.Lock()   
+abort_event = threading.Event()  
+abort_reason = ""                 
 
 latest_sensors = SensorSnapshot()
 
@@ -179,11 +178,18 @@ def configure_transducer_loadcell(apin, rng, rind):
     ljm.eWriteName(mb, f"{ain_name}_SETTLING_US", 0)
 
 def configure_digital_io(diopin_num, func):
-    if func == "input":
-        ljm.eWriteName(mb, f"DIO{diopin_num}_DIRECTION", 0)
+    if diopin_num < 8:
+        reg, bit = "FIO_DIRECTION", diopin_num
+    elif diopin_num < 16:
+        reg, bit = "EIO_DIRECTION", diopin_num - 8
     else:
-        ljm.eWriteName(mb, f"DIO{diopin_num}_DIRECTION", 1)
-        ljm.eWriteName(mb, f"DIO{diopin_num}_STATE", 0)
+        reg, bit = "CIO_DIRECTION", diopin_num - 16
+    current = int(ljm.eReadName(mb, reg))
+    if func == "input":
+        ljm.eWriteName(mb, reg, current & ~(1 << bit))
+    else:
+        ljm.eWriteName(mb, reg, current | (1 << bit))
+        ljm.eWriteName(mb, f"DIO{diopin_num}", 0)
 
 def configure_clock(freq):
     ljm.eWriteName(mb, "DIO_EF_CLOCK0_ENABLE", 0)
@@ -264,7 +270,6 @@ def fire_off():
 
 # ================================
 # SAFETY FUNCTIONS
-# History arrays are local to sampling_loop and passed in explicitly.
 # ================================
 
 def check_rate_of_change(history, current, max_delta, ts):
@@ -316,12 +321,11 @@ def update_history(snap, pastt1, pastt2, pastp1, pastp2, pastp3, pastp4, pastl):
     pastp2[idx] = snap.pt2
     pastp3[idx] = snap.pt3
     pastp4[idx] = snap.pt4
-    pastl[idx]  = snap.load
+    pastl[idx] = snap.load
 
 
 # ================================
 # ABORT
-# Non-blocking: sets reason + event. control_loop runs hardware shutdown on exit.
 # ================================
 
 def abort(reason=""):
@@ -354,8 +358,6 @@ def transition_to(new_state):
 
 # ================================
 # FSM STATE HANDLERS
-# All read-only on snap. state_timer / hot_fire_step / fire_authorized are
-# private to control_loop — no lock needed for those.
 # ================================
 
 # STATE 1: COLD OPS
@@ -373,22 +375,15 @@ def handle_cold_ops(snap):
             print(Fore.YELLOW + "COLD OPS: TCs NOT AT AMBIENT — WAITING")
 
 # STATE 2: PRE-FIRE PURGE
-def handle_pre_fire_purge(snap):
-    global state_timer
-    if state_timer < 0:
-        move(v4_pin, "open", v4_open_pwm, v4_close_pwm)
-        move(v5_pin, "open", v5_open_pwm, v5_close_pwm)
-        state_timer = time.time()
-        return
-    for p in [snap.pt1, snap.pt2, snap.pt3, snap.pt4]:
-        if p > warn_pres_max:
-            abort("ANOMALOUS BACK-PRESSURE DURING PRE-FIRE PURGE")
-            return
-    if time.time() - state_timer >= Purge_Time:
-        move(v4_pin, "closed", v4_open_pwm, v4_close_pwm)
-        move(v5_pin, "closed", v5_open_pwm, v5_close_pwm)
-        transition_to(STATE_FILL)
-        print(Fore.CYAN + "STATE 3: FILL")
+def handle_pre_fire_purge():
+    move(v4_pin, "open", v4_open_pwm, v4_close_pwm)
+    move(v5_pin, "open", v5_open_pwm, v5_close_pwm)
+    print(Fore.CYAN + "PURGING...")
+    time.sleep(Purge_Time)
+    move(v4_pin, "closed", v4_open_pwm, v4_close_pwm)
+    move(v5_pin, "closed", v5_open_pwm, v5_close_pwm)
+    transition_to(STATE_FILL)
+    print(Fore.CYAN + "STATE 3: FILL")
 
 # STATE 3: FILL
 def handle_fill(snap):
@@ -421,47 +416,31 @@ def handle_state_check(snap):
         print(Fore.YELLOW + "STATE 5: HOT FIRE SEQUENCE INITIATED")
 
 # STATE 5: HOT FIRE
-def handle_hot_fire(snap):
-    global hot_fire_step, state_timer
-    if hot_fire_step == 0:
-        fire_on()
-        state_timer   = time.time()
-        hot_fire_step = 1
-    elif hot_fire_step == 1:
-        if snap.pt3 > Max_Chamber_Pressure:
+def handle_hot_fire():
+    fire_on()
+    time.sleep(Delay_1)
+    move(v1_pin, "open", v1_open_pwm, v1_close_pwm)
+    time.sleep(Delay_2)
+    move(v2_pin, "open", v2_open_pwm, v2_close_pwm)
+    t_v2 = time.time()
+    while True:
+        with sensor_lock:
+            pt3 = latest_sensors.pt3
+        elapsed = time.time() - t_v2
+        if pt3 > Max_Chamber_Pressure:
             abort("HARD START — CHAMBER PRESSURE EXCEEDED LIMIT")
-            hot_fire_step = 0
             return
-        if time.time() - state_timer >= Delay_1:
-            move(v1_pin, "open", v1_open_pwm, v1_close_pwm)
-            state_timer   = time.time()
-            hot_fire_step = 2
-    elif hot_fire_step == 2:
-        if snap.pt3 > Max_Chamber_Pressure:
-            abort("HARD START — CHAMBER PRESSURE EXCEEDED LIMIT")
-            hot_fire_step = 0
-            return
-        if time.time() - state_timer >= Delay_2:
-            move(v2_pin, "open", v2_open_pwm, v2_close_pwm)
-            state_timer   = time.time()
-            hot_fire_step = 3
-    elif hot_fire_step == 3:
-        if snap.pt3 > Max_Chamber_Pressure:
-            abort("HARD START — CHAMBER PRESSURE EXCEEDED LIMIT")
-            hot_fire_step = 0
-            return
-        elapsed = time.time() - state_timer
-        if elapsed >= Ignition_Confirm_Time and snap.pt3 < Min_Ignition_Pressure:
+        if elapsed >= Ignition_Confirm_Time and pt3 < Min_Ignition_Pressure:
             abort("IGNITION FAILURE — NO CHAMBER PRESSURE AFTER VALVE OPEN")
-            hot_fire_step = 0
             return
         if elapsed >= Burn_Duration:
-            move(v1_pin, "closed", v1_open_pwm, v1_close_pwm)
-            move(v2_pin, "closed", v2_open_pwm, v2_close_pwm)
-            fire_off()
-            hot_fire_step = 0
-            transition_to(STATE_POST_FIRE_PURGE)
-            print(Fore.CYAN + "STATE 6: POST-FIRE PURGE")
+            break
+        time.sleep(0.001)
+    move(v1_pin, "closed", v1_open_pwm, v1_close_pwm)
+    move(v2_pin, "closed", v2_open_pwm, v2_close_pwm)
+    fire_off()
+    transition_to(STATE_POST_FIRE_PURGE)
+    print(Fore.CYAN + "STATE 6: POST-FIRE PURGE")
 
 # STATE 6: POST-FIRE PURGE
 def handle_post_fire_purge(snap):
@@ -522,18 +501,18 @@ def sampling_loop():
     pastp2 = np.zeros(HIST)
     pastp3 = np.zeros(HIST)
     pastp4 = np.zeros(HIST)
-    pastl  = np.zeros(HIST)
+    pastl = np.zeros(HIST)
     ts = 0
 
     while not abort_event.is_set():
         snap = SensorSnapshot(
-            tc1       = read_temperature(tc1_pin_pos),
-            tc2       = read_temperature(tc2_pin_pos),
-            pt1       = read_pressure(pt1_pin, pt_res_val, pt1_pmin, pt1_pmax),
-            pt2       = read_pressure(pt2_pin, pt_res_val, pt2_pmin, pt2_pmax),
-            pt3       = read_pressure(pt3_pin, pt_res_val, pt3_pmin, pt3_pmax),
-            pt4       = read_pressure(pt4_pin, pt_res_val, pt4_pmin, pt4_pmax),
-            load      = read_load(lc_pin, v_off, kload, v_kload),
+            tc1 = read_temperature(tc1_pin_pos),
+            tc2 = read_temperature(tc2_pin_pos),
+            pt1 = read_pressure(pt1_pin, pt_res_val, pt1_pmin, pt1_pmax),
+            pt2 = read_pressure(pt2_pin, pt_res_val, pt2_pmin, pt2_pmax),
+            pt3 = read_pressure(pt3_pin, pt_res_val, pt3_pmin, pt3_pmax),
+            pt4 = read_pressure(pt4_pin, pt_res_val, pt4_pmin, pt4_pmax),
+            load = read_load(lc_pin, v_off, kload, v_kload),
             timestamp = ts,
         )
 
@@ -550,13 +529,13 @@ def sampling_loop():
         update_history(snap, pastt1, pastt2, pastp1, pastp2, pastp3, pastp4, pastl)
 
         with sensor_lock:
-            latest_sensors.tc1       = snap.tc1
-            latest_sensors.tc2       = snap.tc2
-            latest_sensors.pt1       = snap.pt1
-            latest_sensors.pt2       = snap.pt2
-            latest_sensors.pt3       = snap.pt3
-            latest_sensors.pt4       = snap.pt4
-            latest_sensors.load      = snap.load
+            latest_sensors.tc1 = snap.tc1
+            latest_sensors.tc2 = snap.tc2
+            latest_sensors.pt1 = snap.pt1
+            latest_sensors.pt2 = snap.pt2
+            latest_sensors.pt3 = snap.pt3
+            latest_sensors.pt4 = snap.pt4
+            latest_sensors.load = snap.load
             latest_sensors.timestamp = ts
 
         print(Fore.GREEN + f"TC1: {snap.tc1:.1f}C  TC2: {snap.tc2:.1f}C")
@@ -578,13 +557,13 @@ def control_loop():
         if cur_state == STATE_COLD_OPS:
             handle_cold_ops(snap)
         elif cur_state == STATE_PRE_FIRE_PURGE:
-            handle_pre_fire_purge(snap)
+            handle_pre_fire_purge()
         elif cur_state == STATE_FILL:
             handle_fill(snap)
         elif cur_state == STATE_STATE_CHECK:
             handle_state_check(snap)
         elif cur_state == STATE_HOT_FIRE:
-            handle_hot_fire(snap)
+            handle_hot_fire()
         elif cur_state == STATE_POST_FIRE_PURGE:
             handle_post_fire_purge(snap)
         elif cur_state == STATE_VENT_SAFING:
